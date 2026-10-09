@@ -1,0 +1,82 @@
+# Disposable verification only; scripts/test-railway.sh supplies a unique project.
+# This models Railway's separate pre-deploy command and single shared-volume app.
+services:
+  db:
+    image: noise-monitor-postgis:railway-test
+    platform: linux/amd64
+    build:
+      context: ../..
+      dockerfile: deploy/railway/Dockerfile.postgis
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Temporary test environment required}
+      POSTGRES_USER: ${POSTGRES_USER:?Temporary test environment required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Temporary test environment required}
+      APP_DB_USER: ${APP_DB_USER:?Temporary test environment required}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Temporary test environment required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  migrate:
+    image: noise-monitor:railway-test
+    build:
+      context: ../..
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DB_HOST: db
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_DB_USER: ${APP_DB_USER}
+      DB_RETRY_ATTEMPTS: "10"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    image: noise-monitor:railway-test
+    build:
+      context: ../..
+    user: "0:0"
+    command: ["python", "-m", "scripts.serve_railway"]
+    stop_grace_period: 25s
+    environment:
+      DB_HOST: db
+      POSTGRES_DB: ${POSTGRES_DB}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      # Railway's pre-deploy command shares service configuration. The launcher
+      # deliberately removes these privileged variables from the API and worker.
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      AUDIO_ROOT: /data/audio
+      PORT: "8087"
+      RAILWAY_ENVIRONMENT_ID: isolated-verification
+      RAILWAY_VOLUME_MOUNT_PATH: /data/audio
+      WORKER_POLL_SECONDS: "0.1"
+    volumes:
+      - type: volume
+        source: original_audio
+        target: /data/audio
+        volume:
+          # Railway starts with a root-owned volume; do not copy image ownership.
+          nocopy: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8087/health/ready', timeout=4)"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
+  original_audio:

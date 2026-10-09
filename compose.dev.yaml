@@ -1,0 +1,5 @@
+# Opt-in local SQL access: docker compose -f compose.yaml -f compose.dev.yaml up --build
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DEV_DB_PORT:-5432}:5432"

@@ -1,0 +1,56 @@
+{
+  "screenshots": {
+    "overview": {
+      "file": "assets/overview-normal.jpg",
+      "width": 563,
+      "height": 2013,
+      "contentType": "image/jpeg",
+      "alt": "Actual UrbanEcho overview map during the 9 October simulated normal-reading demonstration. Four saved locations remain on the map; three live simulated senders report, and older silent devices keep missing-data indications visible.",
+      "crop": {"left":0,"top":0.1605,"right":0,"bottom":0.4436}
+    },
+    "incident": {
+      "file": "assets/overview-alert.jpg",
+      "width": 563,
+      "height": 2006,
+      "contentType": "image/jpeg",
+      "alt": "Actual UrbanEcho simulated Workshop reading of 70 dB SPL Z and saved incident notification against a 60 dB SPL Z threshold, captured 9 October 2026 at 18:52 IST.",
+      "crop": {"left":0,"top":0.7501,"right":0,"bottom":0.0129}
+    },
+    "daily": {
+      "file": "assets/daily-report.jpg",
+      "width": 563,
+      "height": 2444,
+      "contentType": "image/jpeg",
+      "alt": "Actual saved UrbanEcho Workshop daily report for 9 October 2026 in Asia/Kolkata. The report shows simulated, partial and provisional status, average recorded-time level 75.49 dB SPL Z and 0.1551 percent coverage, or 134 seconds out of the day.",
+      "crop": {"left":0,"top":0.278,"right":0,"bottom":0.576}
+    }
+  },
+  "currentChecks": {
+    "summary": "5 focused tests passed. A fresh Workshop-only live demo passed, adding 30 recordings and 1 incident, then updating all three saved daily reports.",
+    "notes": "Step 7 performed five targeted tests against disposable PostgreSQL/PostGIS, including both all-location and Workshop-only runs repeated twice. A fresh live demonstration passed on 9 October 2026 around 18:52–18:53 IST. It added 30 recordings and one resolved Workshop incident, preserved older records, and recalculated all three reports. The full 382-backend/34-frontend suites were not rerun for Step 7. See docs/step7/CURRENT-STATUS.md for detailed current checks and final results."
+  },
+  "business": {
+    "offer": "An 8-week pilot\n1 community, 3 shared-area devices",
+    "value": "Compare response time and complaint handling with a baseline.\n\nProposed pilot fee: ₹10,000–₹20,000, with hardware and calibration quoted separately.",
+    "users": "20 communities\n5 recurring reviewers each",
+    "acquisition": "Manager interviews, one supervised pilot, then referrals.\n\nA user reviews the product weekly for four weeks. Future independent use needs access controls.",
+    "notes": "Source: BUSINESS-CASE.md, sections 3–5. Pilot fee is an unvalidated price hypothesis. Users are facilities/security/committee reviewers, not residents, devices or paying organisations. Future site subscription hypothesis is ₹7,500–₹12,000 per community/month for up to three devices. No billing or multi-community service is implemented."
+  },
+  "costs": {
+    "rows": [
+      ["Item", "Planning estimate", "Basis"],
+      ["Complete device assembly", "₹1,800–₹3,000 each", "Unquoted allowance"],
+      ["Local storage + backup", "₹8,000–₹14,000 once", "Two 1 TB drives, allowance"],
+      ["Local hosting", "₹0 external fee", "Existing PC, extras apply"],
+      ["Maintenance per site", "₹3,000–₹9,000/month", "4–12 h at ₹750/h"],
+      ["Future cloud example", "US$37–78/month", "7–30 days of audio"]
+    ],
+    "notes": "Device allowance excludes site-dependent installation labour and calibration. Local primary and backup storage allowance is ₹8,000–₹14,000 for two 1 TB drives. Reference/calibration allowance is ₹10,000–₹25,000 per three-device pilot, unquoted. Bare retail reference: board ₹425 https://robocraze.com/products/esp32-development-board and microphone ₹148 https://robocraze.com/products/inmp441-mems-high-precision-omnidirectional-microphone-module-i2s (listing sold out). Future cloud calculation sources: https://www.digitalocean.com/pricing/droplets ($24 4 GiB/2-vCPU VM), https://docs.digitalocean.com/products/volumes/details/pricing/ ($0.10/GiB/month), https://www.backblaze.com/cloud-storage/pricing ($6.95/TB per 30 days). Observed 9 October 2026. Exact modeled totals $37.41 for seven-day retention and $77.80 for thirty-day retention. Cloud example includes a VM, provisioned audio volume and one logical audio backup, but excludes labour, taxes, currency conversion, DB backups and redundancy. No cloud service enabled."
+  },
+  "roadmap": [
+    ["Oct–Nov 2026", "Step 8 acceptance, one real calibrated device and ten buyer interviews"],
+    ["Dec 2026–\nMar 2027", "First pilot, then agreed retention, backup and viewer access controls"],
+    ["Apr–Jul 2027", "Expand from 5 to 12 communities only after site and capacity checks"],
+    ["Aug–Sep 2027", "Target 20 communities and 100 recurring reviewers if evidence supports it"]
+  ]
+}

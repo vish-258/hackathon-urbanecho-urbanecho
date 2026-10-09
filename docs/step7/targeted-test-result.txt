@@ -1,0 +1,15 @@
+UrbanEcho Step 7 focused simulator test result
+Date: 9 October 2026 (Asia/Kolkata)
+Source: successful terminal tool result, captured here after completion.
+
+Command (from project root):
+PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH" scripts/test-compose.sh python -m pytest -q tests/test_simulator_integration.py
+
+Result:
+5 passed, 2 warnings in 6.98s
+
+Warnings: Starlette's httpx TestClient integration is deprecated; pytest could not write its optional cache in the non-root container. Neither prevented the tests from running or passing.
+
+An earlier incorrect invocation passed a test filename as the container executable and failed before running tests (exec Permission denied). The command above corrected that invocation. This was a command-use error, not an application test failure. The disposable test database was cleaned by the harness.
+
+The previous complete suite result of 382 backend tests and 34 frontend tests is recorded in STEP6-VERIFICATION.md. Those full suites were not rerun for this documentation task.

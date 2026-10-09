@@ -1,0 +1,32 @@
+{
+  "schema": "urbanecho-hardware-v1",
+  "id": "REPLACE_WITH_REGISTERED_DEVICE_UUID",
+  "token": "REPLACE_WITH_PRIVATE_DEVICE_TOKEN",
+  "location_id": "REPLACE_WITH_REGISTERED_LOCATION_UUID",
+  "timezone": "Asia/Kolkata",
+  "api_url": "http://localhost:8000",
+  "endpoint": "https://REPLACE_WITH_BACKEND_LAN_IP:8443",
+  "microphone_model": "INMP441",
+  "calibration": null,
+  "wifi": {"ssid": "", "password": ""},
+  "board": {
+    "profile": "esp32-wroom-32-inmp441",
+    "model": "ESP-WROOM-32",
+    "wiring_verified": false,
+    "sample_lsb": 8,
+    "channel": "left",
+    "gpio_bclk": 26,
+    "gpio_ws": 25,
+    "gpio_data_in": 33
+  },
+  "tls": {"ca_certificate": ""},
+  "sample_rate": 16000,
+  "recording_duration_seconds": 1,
+  "recording_interval_seconds": 1,
+  "upload_interval_seconds": 1,
+  "queue_capacity": 2,
+  "max_frames_per_recording": 16000,
+  "clock": {"sntp_server": "pool.ntp.org", "max_sync_age_seconds": 3600, "clock_jump_tolerance_ms": 250, "uncertainty_budget_ms": 100},
+  "retry": {"max_attempts": 8, "base_ms": 1000, "cap_ms": 30000, "retry_after_cap_ms": 300000},
+  "http_timeout_ms": 10000
+}

@@ -1,0 +1,115 @@
+# Railway deployment
+
+## Current status — 9 October 2026
+
+The deployment package passed local verification. **The Railway backend is not live.** Railway blocked the first database upload and displayed an account restriction requiring a paid-plan upgrade. There is no working public application URL yet, and no cloud end-to-end or persistence result is claimed.
+
+Prepared project: [noise-monitor](https://railway.com/project/8c46a493-9cc5-4d74-892a-9ca5233678d4), environment `production`.
+
+| Component | Railway ID | Prepared state |
+|---|---|---|
+| Project | `8c46a493-9cc5-4d74-892a-9ca5233678d4` | Created |
+| Environment | `aa867f42-3abd-4d30-b204-2faf738b638f` | Production |
+| `noise-postgis` | `e0e4a95b-ec3f-4a6d-841a-db4b9869b5f8` | Configured; first upload failed |
+| `noise-backend` | `93796158-b8f4-45ea-8fac-8cd2fdbf9403` | Configured; not deployed |
+| Database volume | `e49d0d42-ec20-4b15-97ef-5bfc30d75d14` | 500 MB, `/var/lib/postgresql/data` |
+| Audio volume | `73299fdf-1e96-4a3c-bec0-317c3d58258a` | 500 MB, `/data/audio` |
+
+Fresh deployment credentials are configured in Railway service variables; they are not included in source or the ZIP. Local development credentials/data were not copied. The existing local installation was not changed. No `/test` endpoint, dummy check-in loop, or daily processing was added.
+
+## Layout
+
+One application service runs the API and audio worker together through `python -m scripts.serve_railway`. Both use the same mounted audio directory. A separate private database service runs PostgreSQL 17/PostGIS 3.5. Each service needs its own persistent volume. Railway does not run this project's local Docker Compose stack directly, and a volume cannot be shared between two services. See [Railway volumes](https://docs.railway.com/volumes/reference).
+
+`deploy/railway/Dockerfile.postgis` packages the existing database initialization script. It creates the restricted application role and PostGIS extension. It stores PostgreSQL files below the mount root at `/var/lib/postgresql/data/pgdata`.
+
+The application launcher validates `PORT`, requires a real mounted audio volume on Railway, changes only the mount root's ownership, and permanently drops to UID/GID 10001 before starting API/worker. An unexpected exit of either child stops both and returns failure so Railway can restart the service. SIGTERM/SIGINT trigger bounded cleanup. Migrations run separately before deployment.
+
+## Configured service settings
+
+| Setting | `noise-postgis` | `noise-backend` |
+|---|---|---|
+| Dockerfile, from source root | `deploy/railway/Dockerfile.postgis` | `Dockerfile` |
+| Start command | Image default | `python -m scripts.serve_railway` |
+| Pre-deploy command | None | `alembic upgrade head` |
+| Pre-deploy timeout | — | 300 seconds |
+| Readiness path / timeout | Database checked before app deploy | `/health/ready` / 300 seconds |
+| Replicas | 1 | 1 |
+| Serverless sleep | Off | Off |
+| Restart policy | On failure, up to 10 retries | On failure, up to 10 retries |
+| Draining period | 30 seconds | 30 seconds |
+| Public networking | None | Generate HTTPS domain targeting port 8000 after deploy |
+
+Settings were applied explicitly through Railway's API. Do not add a legacy `railway.toml`/`railway.json` to this new project. Current [configuration guidance](https://docs.railway.com/infrastructure-as-code) uses the new infrastructure-as-code workflow when configuration files are desired.
+
+Database variables:
+
+```text
+RAILWAY_DOCKERFILE_PATH=deploy/railway/Dockerfile.postgis
+POSTGRES_DB=noise_monitor
+POSTGRES_USER=noise_migrate
+POSTGRES_PASSWORD=<private generated value>
+APP_DB_USER=noise_app
+APP_DB_PASSWORD=<different private generated value>
+PGDATA=/var/lib/postgresql/data/pgdata
+```
+
+Application variables:
+
+```text
+DB_HOST=${{noise-postgis.RAILWAY_PRIVATE_DOMAIN}}
+DB_PORT=5432
+POSTGRES_DB=${{noise-postgis.POSTGRES_DB}}
+POSTGRES_USER=${{noise-postgis.POSTGRES_USER}}
+POSTGRES_PASSWORD=${{noise-postgis.POSTGRES_PASSWORD}}
+APP_DB_USER=${{noise-postgis.APP_DB_USER}}
+APP_DB_PASSWORD=${{noise-postgis.APP_DB_PASSWORD}}
+ADMIN_TOKEN=<private generated value, different from local development>
+RAILWAY_RUN_UID=0
+AUDIO_ROOT=/data/audio
+PORT=8000
+DB_RETRY_ATTEMPTS=15
+DB_RETRY_DELAY_SECONDS=2
+```
+
+Railway supplies `RAILWAY_ENVIRONMENT_ID` and `RAILWAY_VOLUME_MOUNT_PATH` when its volume is attached; the latter must equal `/data/audio`. Root is used only for storage initialization, addressing [Railway's volume ownership behavior](https://docs.railway.com/volumes). API and worker run without root privileges.
+
+The privileged migration password remains a Railway service variable because pre-deploy needs it. The launcher removes `POSTGRES_PASSWORD`, `POSTGRES_USER`, and `MIGRATION_DATABASE_URL` from child environments; this is not isolation from the service configuration or its supervisor. The normal app connection uses the restricted role. [Pre-deploy commands](https://docs.railway.com/deployments/pre-deploy-command) have private-network access but no mounted audio volume.
+
+Changing PostgreSQL password variables after initial database creation does not rotate an existing database role. Use an explicit coordinated credential rotation when required.
+
+## Resume once Railway lifts the restriction
+
+Use the existing project and volumes; do not create duplicates. Check current deployment state before retrying. Deploy the database first from this exact source directory:
+
+```sh
+railway up . --path-as-root \
+  --project 8c46a493-9cc5-4d74-892a-9ca5233678d4 \
+  --environment aa867f42-3abd-4d30-b204-2faf738b638f \
+  --service e0e4a95b-ec3f-4a6d-841a-db4b9869b5f8 --detach
+```
+
+Confirm database startup and private connectivity, then deploy the same source to the application service:
+
+```sh
+railway up . --path-as-root \
+  --project 8c46a493-9cc5-4d74-892a-9ca5233678d4 \
+  --environment aa867f42-3abd-4d30-b204-2faf738b638f \
+  --service 93796158-b8f4-45ea-8fac-8cd2fdbf9403 --detach
+```
+
+Wait for successful pre-deploy migrations and readiness, then generate the application HTTPS domain with target port 8000. Confirm both services/volumes occupy the same region and that the database has no public domain or TCP proxy. Upload only this source directory: `.railwayignore` excludes credentials, recordings, backups and local working files. See [CLI upload behavior](https://docs.railway.com/cli/up).
+
+Before reporting the cloud installation as working, verify HTTPS readiness, protected routes rejecting unauthenticated requests, `/demo`, a clearly labelled synthetic WAV upload processed by the worker, incident events over authenticated SSE/reconnect, and database/audio/event persistence after one controlled restart. Cloud networking, HTTPS, Railway volume permissions, worker survival and account resource limits remain unverified until those checks pass.
+
+The two currently allocated volumes are 500 MB each. Select suitable capacity, retention and backup arrangements before sustained real-device recording. Do not remove volumes to resolve a deployment failure.
+
+## Local verification
+
+```sh
+./scripts/test-railway.sh
+```
+
+This passed with a separate disposable Compose project, fresh private credentials, the custom PostGIS image, a root-owned audio volume, dynamic port 8087, and the combined launcher. It confirmed migration `0003_legacy_audio_guard`, restricted database privileges, real upload/processing/incident behavior, original-audio checksums and event/recovery persistence after container recreation, privilege dropping, child credential filtering, failure supervision, and refusal to start without mounted audio storage.
+
+All 27 launcher tests also passed. The ordinary local development stack and its volumes were retained. See `VERIFICATION.md` for the broader backend's earlier verification evidence.

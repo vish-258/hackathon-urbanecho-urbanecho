@@ -1,0 +1,16 @@
+{
+  "recorded_date": "2026-10-09",
+  "source": "Actual local application browser screencast",
+  "audio": "No audio track; narration supplied separately",
+  "editing": "Trimmed setup lead-in; excluded transient full-page screenshot resize frames and one blank transition frame. Held the preceding valid capture until the next valid timestamp. No fabricated application screens.",
+  "dimensions": [
+    572,
+    1000
+  ],
+  "duration_seconds": 152.0,
+  "fps": 12.0,
+  "decode_check": "passed",
+  "size_bytes": 1372291,
+  "frames_source": 68,
+  "subtitles": "UrbanEcho-Demo.srt, also embedded as default subtitle track"
+}

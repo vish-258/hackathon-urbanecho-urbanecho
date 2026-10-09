@@ -1,0 +1,39 @@
+1
+00:00:00,000 --> 00:00:15,000
+UrbanEcho: local software demonstration.
+Three simulated devices. No physical acoustic validation.
+
+2
+00:00:16,000 --> 00:00:33,000
+Workshop exceeds 60 dB.
+One saved incident and one opening notification.
+
+3
+00:00:34,000 --> 00:00:57,000
+Further excessive readings extend the same incident.
+Map values come from saved measurements.
+
+4
+00:00:58,000 --> 00:01:17,000
+Senders pause. The device becomes stale.
+Missing data does not resolve excessive noise.
+
+5
+00:01:18,000 --> 00:01:40,000
+Three contiguous normal readings resolve the incident.
+Saved history remains available.
+
+6
+00:01:41,000 --> 00:01:52,000
+The incident is saved as resolved.
+Incident history uses UTC; details use the location timezone.
+
+7
+00:01:53,000 --> 00:02:15,000
+Three excessive readings, then three normal readings.
+These are generated test recordings.
+
+8
+00:02:16,000 --> 00:02:32,000
+Daily result: 75.49 dB over 134 seconds.
+Simulated, partial coverage, and today is provisional.

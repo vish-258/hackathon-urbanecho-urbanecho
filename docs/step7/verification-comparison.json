@@ -1,0 +1,193 @@
+{
+  "checked_at_local": "2026-10-09T18:54:23.526439+05:30",
+  "comparisons": {
+    "all_prior_recording_ids_retained": true,
+    "all_prior_checksums_and_sizes_unchanged": true,
+    "added_recordings": 30,
+    "report_ids_unchanged": true,
+    "summary_ids_unchanged": true,
+    "location_definitions_unchanged": true,
+    "device_registrations_unchanged": true,
+    "unchanged_simulated_thresholds": [
+      {
+        "id": "03dfb457-7c09-46e4-b1cb-b9adcc2e83cc",
+        "name": "SIMULATED \u00b7 East gate \u00b7 52228023",
+        "threshold_value": 62.0,
+        "threshold_type": "spl_z_leq"
+      },
+      {
+        "id": "34288d50-34c4-4862-b83e-6eaa519e5926",
+        "name": "SIMULATED \u00b7 Workshop \u00b7 52228023",
+        "threshold_value": 60.0,
+        "threshold_type": "spl_z_leq"
+      },
+      {
+        "id": "e1e8e3b5-827f-4f8a-8647-3130b57609df",
+        "name": "SIMULATED \u00b7 North garden \u00b7 52228023",
+        "threshold_value": 60.0,
+        "threshold_type": "spl_z_leq"
+      }
+    ],
+    "older_day_reports_unchanged": true,
+    "older_day_summaries_unchanged": true
+  },
+  "url_checks": [
+    {
+      "path": "/app",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 3525
+    },
+    {
+      "path": "/docs",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 1026
+    },
+    {
+      "path": "/health/live",
+      "status": 200,
+      "content_type": "application/json",
+      "bytes": 18
+    },
+    {
+      "path": "/health/ready",
+      "status": 200,
+      "content_type": "application/json",
+      "bytes": 436
+    }
+  ],
+  "openapi_route_checks": [
+    {
+      "path": "/locations",
+      "method": "GET",
+      "present": true,
+      "operation_id": "locations_locations_get"
+    },
+    {
+      "path": "/locations",
+      "method": "POST",
+      "present": true,
+      "operation_id": "create_location_locations_post"
+    },
+    {
+      "path": "/locations/{location_id}",
+      "method": "GET",
+      "present": true,
+      "operation_id": "get_location_locations__location_id__get"
+    },
+    {
+      "path": "/locations/{location_id}",
+      "method": "PATCH",
+      "present": true,
+      "operation_id": "update_location_locations__location_id__patch"
+    },
+    {
+      "path": "/locations/{location_id}/threshold",
+      "method": "GET",
+      "present": true,
+      "operation_id": "get_threshold_locations__location_id__threshold_get"
+    },
+    {
+      "path": "/locations/{location_id}/threshold",
+      "method": "PATCH",
+      "present": true,
+      "operation_id": "update_threshold_locations__location_id__threshold_patch"
+    },
+    {
+      "path": "/devices",
+      "method": "GET",
+      "present": true,
+      "operation_id": "devices_devices_get"
+    },
+    {
+      "path": "/devices",
+      "method": "POST",
+      "present": true,
+      "operation_id": "register_device_devices_post"
+    },
+    {
+      "path": "/devices/{device_id}",
+      "method": "GET",
+      "present": true,
+      "operation_id": "device_devices__device_id__get"
+    },
+    {
+      "path": "/devices/{device_id}",
+      "method": "PATCH",
+      "present": true,
+      "operation_id": "update_device_devices__device_id__patch"
+    },
+    {
+      "path": "/audio",
+      "method": "POST",
+      "present": true,
+      "operation_id": "upload_audio_post"
+    },
+    {
+      "path": "/audio/{chunk_id}",
+      "method": "GET",
+      "present": true,
+      "operation_id": "audio_status_audio__chunk_id__get"
+    },
+    {
+      "path": "/audio/{chunk_id}/file",
+      "method": "GET",
+      "present": true,
+      "operation_id": "download_audio_audio__chunk_id__file_get"
+    },
+    {
+      "path": "/measurements",
+      "method": "GET",
+      "present": true,
+      "operation_id": "measurements_measurements_get"
+    },
+    {
+      "path": "/incidents",
+      "method": "GET",
+      "present": true,
+      "operation_id": "incidents_incidents_get"
+    },
+    {
+      "path": "/locations/status",
+      "method": "GET",
+      "present": true,
+      "operation_id": "location_status_locations_status_get"
+    },
+    {
+      "path": "/events/stream",
+      "method": "GET",
+      "present": true,
+      "operation_id": "event_stream_events_stream_get"
+    },
+    {
+      "path": "/daily-summaries",
+      "method": "GET",
+      "present": true,
+      "operation_id": "get_daily_summary_daily_summaries_get"
+    },
+    {
+      "path": "/daily-summaries/generate",
+      "method": "POST",
+      "present": true,
+      "operation_id": "generate_daily_summary_daily_summaries_generate_post"
+    },
+    {
+      "path": "/daily-summaries/jobs/{report_id}",
+      "method": "GET",
+      "present": true,
+      "operation_id": "get_daily_job_daily_summaries_jobs__report_id__get"
+    }
+  ],
+  "focused_incident": {
+    "id": "5605c013-d984-4abc-ac36-a0cc43f00be5",
+    "device_id": "6712603f-6647-4c5b-be47-3f24e71656d1",
+    "location_id": "34288d50-34c4-4862-b83e-6eaa519e5926",
+    "status": "resolved",
+    "started_at": "2026-10-09 13:22:07.547314+00:00",
+    "ended_at": "2026-10-09 13:23:08.356004+00:00",
+    "breach_count": 3,
+    "peak_db": 80.00000965452668,
+    "threshold_value": 60.0
+  }
+}

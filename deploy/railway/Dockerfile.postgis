@@ -1,0 +1,8 @@
+FROM postgis/postgis:17-3.5
+
+# Railway builds this Dockerfile with the repository root as its build context.
+# Run the same restricted-role initialization as the local installation.
+COPY --chmod=755 docker/20-app-role.sh /docker-entrypoint-initdb.d/20-app-role.sh
+
+# Keep PostgreSQL files below the volume root (which may contain lost+found).
+ENV PGDATA=/var/lib/postgresql/data/pgdata

@@ -1,0 +1,26 @@
+# OPTIONAL preparation only. Not included in the normal local application stack.
+# Follow docs/HARDWARE-INTEGRATION.md after confirming the actual board and wiring.
+services:
+  device-api:
+    extends:
+      file: compose.yaml
+      service: worker
+    profiles: [hardware]
+    command: ["python", "-m", "app.device_server"]
+    environment:
+      LOCAL_BROWSER_ACCESS: "false"
+      HARDWARE_BIND_IP: ${HARDWARE_BIND_IP:?Set the Mac's private LAN IPv4 in the generated listener.env}
+      HARDWARE_TLS_ROOT: /run/hardware-tls
+    ports:
+      - "${HARDWARE_BIND_IP:?Set an explicit private LAN IPv4}:8443:8443"
+    volumes:
+      - ${HARDWARE_TLS_DIR:?Run setup-hardware-tls.py first}/server.crt:/run/hardware-tls/server.crt:ro
+      - ${HARDWARE_TLS_DIR:?Run setup-hardware-tls.py first}/server.key:/run/hardware-tls/server.key:ro
+      - ${HARDWARE_TLS_DIR:?Run setup-hardware-tls.py first}/ca.crt:/run/hardware-tls/ca.crt:ro
+    healthcheck:
+      # Server-side liveness inside its own container. Devices must validate the
+      # CA and IP SAN; this internal check never sends credentials.
+      test: ["CMD", "python", "-c", "import ssl,urllib.request; c=ssl.create_default_context(cafile='/run/hardware-tls/ca.crt'); urllib.request.urlopen('https://127.0.0.1:8443/health/live',context=c,timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

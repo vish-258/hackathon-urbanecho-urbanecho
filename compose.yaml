@@ -1,0 +1,108 @@
+name: noise-monitor
+
+x-app-environment: &app-environment
+  DB_HOST: db
+  DB_PORT: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:-noise_monitor}
+  APP_DB_USER: ${APP_DB_USER:-noise_app}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Run the documented environment setup first}
+  ADMIN_TOKEN: ${ADMIN_TOKEN:?Run the documented environment setup first}
+  AUDIO_ROOT: /data/audio
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-20000000}
+  MAX_DURATION_SECONDS: ${MAX_DURATION_SECONDS:-60}
+  ALLOWED_SAMPLE_RATES: ${ALLOWED_SAMPLE_RATES:-[16000,32000,44100,48000]}
+  DB_RETRY_ATTEMPTS: ${DB_RETRY_ATTEMPTS:-5}
+  DB_RETRY_DELAY_SECONDS: ${DB_RETRY_DELAY_SECONDS:-1}
+  WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1}
+  JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-120}
+  JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-5}
+  JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-2}
+  DAILY_SCHEDULE_ENABLED: ${DAILY_SCHEDULE_ENABLED:-true}
+  DAILY_SCHEDULE_MINUTE: ${DAILY_SCHEDULE_MINUTE:-5}
+  DAILY_SCHEDULE_POLL_SECONDS: ${DAILY_SCHEDULE_POLL_SECONDS:-60}
+  DAILY_JOB_LEASE_SECONDS: ${DAILY_JOB_LEASE_SECONDS:-600}
+  DAILY_JOB_MAX_ATTEMPTS: ${DAILY_JOB_MAX_ATTEMPTS:-5}
+  LIVE_FRESHNESS_SECONDS: ${LIVE_FRESHNESS_SECONDS:-120}
+  FUTURE_SKEW_SECONDS: ${FUTURE_SKEW_SECONDS:-5}
+  DATA_STALE_SECONDS: ${DATA_STALE_SECONDS:-30}
+  RECOVERY_COUNT: ${RECOVERY_COUNT:-3}
+  EVENT_REPLAY_SECONDS: ${EVENT_REPLAY_SECONDS:-604800}
+  SSE_POLL_SECONDS: ${SSE_POLL_SECONDS:-0.25}
+  SSE_HEARTBEAT_SECONDS: ${SSE_HEARTBEAT_SECONDS:-10}
+  SSE_BATCH_SIZE: ${SSE_BATCH_SIZE:-100}
+
+x-app: &app
+  image: noise-monitor:local
+  build: .
+  init: true
+  environment: *app-environment
+  restart: unless-stopped
+  volumes:
+    - original_audio:/data/audio
+  depends_on:
+    db:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-noise_monitor}
+      POSTGRES_USER: ${POSTGRES_USER:-noise_migrate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run the documented environment setup first}
+      APP_DB_USER: ${APP_DB_USER:-noise_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Run the documented environment setup first}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/20-app-role.sh:/docker-entrypoint-initdb.d/20-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  migrate:
+    image: noise-monitor:local
+    build: .
+    init: true
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-noise_monitor}
+      POSTGRES_USER: ${POSTGRES_USER:-noise_migrate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run the documented environment setup first}
+      APP_DB_USER: ${APP_DB_USER:-noise_app}
+      DB_RETRY_ATTEMPTS: ${DB_RETRY_ATTEMPTS:-5}
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    # Local browser sessions are available only on this loopback-bound service.
+    environment:
+      <<: *app-environment
+      LOCAL_BROWSER_ACCESS: ${LOCAL_BROWSER_ACCESS:-true}
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.worker"]
+
+volumes:
+  postgres_data:
+  original_audio:

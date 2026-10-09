@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Noise Monitor · Live desk</title><link rel="stylesheet" href="/demo/style.css"></head>
+<body>
+<header><a class="brand" href="/demo"><span class="wave">≋</span> Noise Monitor</a><span class="eyebrow">LIVE OBSERVATION DESK</span><a href="/docs">API reference ↗</a></header>
+<main>
+<section class="intro"><div><div class="eyebrow">ENVIRONMENTAL MONITORING</div><h1>Listen. Observe. Respond.</h1><p>Live noise incidents, independent device states, and a clear view of data freshness.</p></div><div id="connection" class="connection" role="status">○ Disconnected</div></section>
+<form id="connect-form"><label for="token">Administrator token</label><div class="form-row"><input id="token" type="password" placeholder="Paste your administrator token" autocomplete="off" required><button id="connect" type="submit">Connect live</button><button id="disconnect" type="button" class="secondary" disabled>Disconnect</button></div><small>Your token stays in this page’s memory. It is never saved or added to a URL.</small></form>
+<div id="notice" class="notice" role="status">Connect to load the current state and receive new events.</div>
+<section class="summary" aria-label="Summary"><div><span id="location-count">—</span>Locations</div><div><span id="incident-count">—</span>Unresolved incidents</div><div><span id="stale-count">—</span>Stale / unknown</div></section>
+<div class="dashboard"><section class="panel map-panel"><div class="panel-heading"><h2>Location overview</h2><span class="eyebrow">COORDINATE VIEW</span></div><svg id="map" viewBox="0 0 720 340" role="img" aria-label="Location markers by longitude and latitude"><path class="grid" d="M20 70H700M20 140H700M20 210H700M20 280H700M140 20V320M280 20V320M420 20V320M560 20V320"/></svg><p class="caption">Schematic latitude / longitude plot, fitted to visible stations. Marker color shows noise; dashed rings show stale or unknown data.</p><div class="legend"><span class="normal">● Normal</span><span class="excessive">● Excessive</span><span class="recovering">● Recovering</span><span class="unknown">● Unknown</span></div></section><section class="panel"><div class="panel-heading"><h2>Unresolved incidents</h2><span id="active-label" class="eyebrow">WAITING</span></div><div id="incidents" class="stack"><p class="empty">Your current incidents will appear here.</p></div></section></div>
+<section class="panel"><div class="panel-heading"><h2>Stations & devices</h2><span class="eyebrow">NOISE + FRESHNESS</span></div><div id="locations" class="locations"><p class="empty">No snapshot loaded.</p></div></section>
+<section class="panel"><div class="panel-heading"><h2>Incoming events</h2><span class="eyebrow">LATEST 100</span></div><ol id="feed"><li class="empty">New events will appear here. Existing history never triggers opening popups.</li></ol></section>
+<footer>Readings retain their recorded method and threshold version. Physical sound levels require applicable microphone calibration.</footer>
+</main><aside id="toasts" aria-live="polite" aria-label="Incident notifications"></aside><script type="module" src="/demo/demo.js"></script>
+</body></html>

@@ -1,0 +1,5 @@
+# Selected PostGIS image is amd64. Enable emulation on Apple Silicon.
+# docker compose -f compose.yaml -f compose.amd64.yaml up --build
+services:
+  db:
+    platform: linux/amd64
