@@ -110,9 +110,47 @@ def device_configuration_event(db, device, location, reason):
     }, device_id=device.id, location_id=location.id)
 
 
-def page(db, query, limit, offset, serializer=model_dict):
+def page(db, query, limit, offset, serializer=model_dict, *, serialize_many=None):
     total = db.scalar(select(func.count()).select_from(query.subquery()))
-    return {"items": [serializer(row) for row in db.scalars(query.limit(limit).offset(offset))], "total": total, "limit": limit, "offset": offset}
+    rows = db.scalars(query.limit(limit).offset(offset)).all()
+    items = serialize_many(rows) if serialize_many else [serializer(row) for row in rows]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+def measurement_dicts(db, rows):
+    """Fetch related history once per batch, retaining each reading's saved rule."""
+    if not rows:
+        return []
+    chunks = {row.id: row for row in db.scalars(select(AudioChunk).where(
+        AudioChunk.id.in_({item.audio_chunk_id for item in rows})))}
+    evaluations = {row.measurement_id: row for row in db.scalars(select(MeasurementEvaluation).where(
+        MeasurementEvaluation.measurement_id.in_([item.id for item in rows])))}
+    rule_ids = {item.threshold_version_id for item in evaluations.values() if item.threshold_version_id}
+    rules = {row.id: row for row in db.scalars(select(ThresholdVersion).where(
+        ThresholdVersion.id.in_(rule_ids)))} if rule_ids else {}
+    items = []
+    for row in rows:
+        chunk = chunks[row.audio_chunk_id]
+        evaluation = evaluations.get(row.id)
+        rule = rules.get(evaluation.threshold_version_id) if evaluation else None
+        items.append({**model_dict(row, ("content_hash",)),
+            "device_id": chunk.device_id, "location_id": chunk.location_id,
+            "location_snapshot": chunk.location_snapshot, "captured_at": chunk.captured_at,
+            "duration_seconds": chunk.duration_seconds,
+            "threshold_value": rule.threshold_value if rule else chunk.threshold_value,
+            "threshold_type": rule.threshold_type if rule else chunk.threshold_type,
+            "threshold_version": model_dict(rule) if rule else None,
+            "evaluation": model_dict(evaluation, ("content_hash",)) if evaluation else None})
+    return items
+
+
+def incident_dicts(db, rows):
+    """Readable registered codes accompany UUIDs without fetching credentials."""
+    if not rows:
+        return []
+    codes = dict(db.execute(select(Device.id, Device.external_id).where(
+        Device.id.in_({row.device_id for row in rows}))).all())
+    return [{**model_dict(row), "device_external_id": codes.get(row.device_id)} for row in rows]
 
 
 @asynccontextmanager
@@ -348,7 +386,7 @@ def create_app():
         job = db.scalar(select(ProcessingJob).where(ProcessingJob.audio_chunk_id == row.id))
         results = db.scalars(select(Measurement).where(Measurement.audio_chunk_id == row.id).order_by(Measurement.received_at, Measurement.id)).all()
         return {**model_dict(row, ("file_path",)), "job": model_dict(job, ("lease_token",)) if job else None,
-                "measurements": [measurement_dict(db, item) for item in results]}
+                "measurements": measurement_dicts(db, results)}
 
     @app.get("/audio/{chunk_id}/file", tags=["audio"])
     def download_audio(chunk_id: UUID, db: DB, token: Token):
@@ -357,19 +395,6 @@ def create_app():
         if not path.is_file():
             raise HTTPException(503, "Original audio unavailable; restore storage from backup")
         return FileResponse(path, media_type="audio/wav", filename=f"{row.id}.wav", headers={"ETag": f'"{row.checksum}"'})
-
-    def measurement_dict(db, row):
-        evaluation = db.scalar(select(MeasurementEvaluation).where(MeasurementEvaluation.measurement_id == row.id))
-        chunk = db.get(AudioChunk, row.audio_chunk_id)
-        rule = db.get(ThresholdVersion, evaluation.threshold_version_id) if evaluation and evaluation.threshold_version_id else None
-        return {**model_dict(row, ("content_hash",)),
-                "device_id": chunk.device_id, "location_id": chunk.location_id,
-                "location_snapshot": chunk.location_snapshot, "captured_at": chunk.captured_at,
-                "duration_seconds": chunk.duration_seconds,
-                "threshold_value": rule.threshold_value if rule else chunk.threshold_value,
-                "threshold_type": rule.threshold_type if rule else chunk.threshold_type,
-                "threshold_version": model_dict(rule) if rule else None,
-                "evaluation": model_dict(evaluation, ("content_hash",)) if evaluation else None}
 
     @app.get("/measurements", tags=["measurements"])
     def measurements(db: DB, admin: Admin, device_id: UUID | None = None, location_id: UUID | None = None,
@@ -386,7 +411,8 @@ def create_app():
             query = query.where(Measurement.measured_at >= since)
         if until:
             query = query.where(Measurement.measured_at <= until)
-        return page(db, query.order_by(Measurement.measured_at.desc(), Measurement.id), limit, offset, lambda row: measurement_dict(db, row))
+        return page(db, query.order_by(Measurement.measured_at.desc(), Measurement.id), limit, offset,
+                    serialize_many=lambda rows: measurement_dicts(db, rows))
 
     @app.get("/incidents", tags=["incidents"])
     def incidents(db: DB, admin: Admin, device_id: UUID | None = None, location_id: UUID | None = None,
@@ -403,6 +429,7 @@ def create_app():
                 Location.name.icontains(term, autoescape=True),
                 Incident.location_snapshot["name"].astext.icontains(term, autoescape=True),
                 Device.microphone_model.icontains(term, autoescape=True),
+                Device.external_id.icontains(term, autoescape=True),
                 cast(Device.id, String).icontains(term, autoescape=True),
                 cast(Incident.id, String).icontains(term, autoescape=True),
             ))
@@ -418,13 +445,14 @@ def create_app():
             query = query.where(Incident.started_at >= since)
         if until:
             query = query.where(Incident.started_at <= until)
-        return page(db, query.order_by(Incident.started_at.desc(), Incident.id), limit, offset)
+        return page(db, query.order_by(Incident.started_at.desc(), Incident.id), limit, offset,
+                    serialize_many=lambda rows: incident_dicts(db, rows))
 
     @app.get("/incidents/{incident_id}", tags=["incidents"])
     def incident(incident_id: UUID, db: DB, admin: Admin):
         row = require_row(db, Incident, incident_id)
         rule = db.get(ThresholdVersion, row.threshold_version_id) if row.threshold_version_id else None
-        return {**model_dict(row), "threshold_version": model_dict(rule) if rule else None}
+        return {**incident_dicts(db, [row])[0], "threshold_version": model_dict(rule) if rule else None}
 
     @app.get("/incidents/{incident_id}/measurements", tags=["incidents"])
     def incident_measurements(incident_id: UUID, db: DB, admin: Admin,
@@ -446,7 +474,7 @@ def create_app():
         if incident.ended_at is not None:
             query = query.where(Measurement.measured_at < incident.ended_at)
         result = page(db, query.order_by(Measurement.measured_at, Measurement.id), limit, offset,
-                      lambda row: measurement_dict(db, row))
+                      serialize_many=lambda rows: measurement_dicts(db, rows))
         return {**result, "association_available": True}
 
     @app.get("/events", tags=["live"])

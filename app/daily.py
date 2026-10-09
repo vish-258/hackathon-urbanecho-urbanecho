@@ -119,7 +119,8 @@ def exclusion_reason(chunk, measurement, assignment) -> str | None:
         return "value_out_of_range"
     if measurement.measurement_type == "spl_z_leq":
         snapshot = SimpleNamespace(calibration=measurement.calibration_snapshot,
-                                   captured_at=chunk.captured_at, sample_rate=chunk.sample_rate,
+                                   audio_format=chunk.audio_format, captured_at=chunk.captured_at,
+                                   sample_rate=chunk.sample_rate,
                                    duration_seconds=chunk.duration_seconds)
         calibration = _calibration_offset(snapshot)
         if (measurement.calibration_status != "calibrated" or calibration is None

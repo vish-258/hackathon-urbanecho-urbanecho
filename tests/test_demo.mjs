@@ -141,12 +141,14 @@ test('live stream metadata keeps method and calibration attached to the rendered
   const state = applySnapshot(initialState(), snapshot());
   applyEvent(state, event('location.status_changed', {measurement_type: 'dbfs_rms', weighting: 'none',
     interval_seconds: 1, calibration_status: 'not_required', measurement_value: -20,
+    received_at: '2026-10-09T00:00:02Z',
     incident_id: null, noise_status: 'normal'}), `${epoch}:1`);
   const stream = state.locations.get('loc-a').streams[0];
   assert.equal(formatLevel(stream.measurement_value, stream.measurement_type), '-20.00 dBFS');
   assert.equal(stream.calibration_status, 'not_required');
   assert.equal(stream.weighting, 'none');
   assert.equal(stream.interval_seconds, 1);
+  assert.equal(stream.received_at, '2026-10-09T00:00:02Z');
 });
 test('invalid data stays distinguishable from stale until the freshness window expires', () => {
   const state = applySnapshot(initialState(), snapshot());
@@ -165,4 +167,140 @@ test('valid measurement clears the previous invalid-data diagnostic', () => {
   applyEvent(state, event('location.status_changed', {event_id: 'evt-2', data_status: 'fresh',
     transition_reason: 'measurement_evaluated', diagnostic: null}), `${epoch}:2`);
   assert.equal(state.locations.get('loc-a').streams[0].diagnostic, null);
+});
+
+test('a new interval or measurement type replaces an old normal stream before it ages stale', () => {
+  for (const replacement of [{interval_seconds: 2}, {measurement_type: 'dbfs_rms'}]) {
+    const seed = snapshot();
+    seed.items[0].devices = [{id: 'device-a', enabled: true, assignment_id: 'assignment-a'}];
+    const state = applySnapshot(initialState(), seed);
+    applyEvent(state, event('location.status_changed', {incident_id: null, noise_status: 'normal',
+      measured_at: '2026-10-09T00:00:00Z', measurement_type: 'spl_z_leq', interval_seconds: 1}), `${epoch}:1`);
+    applyEvent(state, event('location.status_changed', {event_id: 'evt-2', incident_id: null,
+      stream_id: 'new-stream', noise_status: 'normal', measured_at: '2026-10-09T00:00:25Z', ...replacement}), `${epoch}:2`);
+    ageData(state, Date.parse('2026-10-09T00:00:31Z'), 30);
+    assert.deepEqual(state.locations.get('loc-a').streams.map(stream => stream.id), ['new-stream']);
+    assert.equal(state.locations.get('loc-a').data_status, 'fresh');
+    // A later stale transition for an old stream must not reinstate it either.
+    applyEvent(state, event('location.status_changed', {event_id: 'evt-3', incident_id: null,
+      noise_status: 'normal', data_status: 'stale', measured_at: '2026-10-09T00:00:00Z'}), `${epoch}:3`);
+    assert.deepEqual(state.locations.get('loc-a').streams.map(stream => stream.id), ['new-stream']);
+    assert.equal(state.locations.get('loc-a').data_status, 'fresh');
+  }
+});
+
+test('old streams with unresolved incidents survive until closure, independently of newer streams', () => {
+  const seed = snapshot();
+  seed.items[0].devices = [{id: 'device-a', enabled: true, assignment_id: 'assignment-a'}];
+  const state = applySnapshot(initialState(), seed);
+  applyEvent(state, event('incident.opened', {measured_at: '2026-10-09T00:00:00Z'}), `${epoch}:1`);
+  applyEvent(state, event('location.status_changed', {event_id: 'evt-2', stream_id: 'new-stream',
+    incident_id: null, noise_status: 'normal', measured_at: '2026-10-09T00:00:25Z'}), `${epoch}:2`);
+  ageData(state, Date.parse('2026-10-09T00:00:31Z'), 30);
+  assert.equal(state.locations.get('loc-a').streams.length, 2);
+  assert.equal(state.locations.get('loc-a').noise_status, 'excessive');
+  assert.equal(state.locations.get('loc-a').data_status, 'stale');
+  applyEvent(state, event('incident.closed', {event_id: 'evt-3', incident_status: 'closed',
+    transition_reason: 'threshold_changed'}), `${epoch}:3`);
+  assert.equal(state.incidents.has('incident-a'), false);
+  assert.deepEqual(state.locations.get('loc-a').streams.map(stream => stream.id), ['new-stream']);
+  assert.equal(state.locations.get('loc-a').noise_status, 'normal');
+  assert.equal(state.locations.get('loc-a').data_status, 'fresh');
+});
+
+test('device removal retires normal data and keeps only unresolved old-location evidence', () => {
+  for (const hasIncident of [false, true]) {
+    const seed = snapshot();
+    seed.items[0].devices = [{id: 'device-a', enabled: true, assignment_id: 'assignment-a'}];
+    const state = applySnapshot(initialState(), seed);
+    applyEvent(state, event(hasIncident ? 'incident.opened' : 'location.status_changed', {
+      incident_id: hasIncident ? 'incident-a' : null, noise_status: hasIncident ? 'excessive' : 'normal',
+      measured_at: '2026-10-09T00:00:00Z'}), `${epoch}:1`);
+    applyEvent(state, event('location.status_changed', {event_id: 'evt-2', stream_id: null,
+      incident_id: null, transition_reason: 'device_removed'}), `${epoch}:2`);
+    assert.equal(state.locations.get('loc-a').devices.length, 0);
+    assert.equal(state.locations.get('loc-a').streams.length, hasIncident ? 1 : 0);
+    if (hasIncident) {
+      // The closure belongs to the former location but carries the new chunk's
+      // assignment. It must not put the device back on the old location roster.
+      applyEvent(state, event('incident.closed', {event_id: 'evt-3', incident_status: 'closed',
+        assignment_id: 'assignment-b', transition_reason: 'device_reassigned'}), `${epoch}:3`);
+      assert.equal(state.locations.get('loc-a').devices.length, 0);
+      assert.equal(state.locations.get('loc-a').streams.length, 0);
+      assert.equal(state.incidents.size, 0);
+    }
+  }
+});
+
+test('location reconfiguration installs the replacement assignment and retires its old normal stream', () => {
+  const seed = snapshot();
+  seed.items[0].devices = [{id: 'device-a', enabled: true, assignment_id: 'assignment-a'}];
+  const state = applySnapshot(initialState(), seed);
+  applyEvent(state, event('location.status_changed', {incident_id: null, noise_status: 'normal'}), `${epoch}:1`);
+  applyEvent(state, event('location.status_changed', {event_id: 'evt-2', stream_id: null,
+    incident_id: null, assignment_id: 'replacement-assignment', transition_reason: 'location_configured'}), `${epoch}:2`);
+  assert.equal(state.locations.get('loc-a').streams.length, 0);
+  assert.equal(state.locations.get('loc-a').devices[0].assignment_id, 'replacement-assignment');
+  applyEvent(state, event('location.status_changed', {event_id: 'evt-3', stream_id: 'replacement-stream',
+    incident_id: null, noise_status: 'normal', assignment_id: 'replacement-assignment'}), `${epoch}:3`);
+  assert.equal(state.locations.get('loc-a').data_status, 'fresh');
+});
+
+test('a first measurement can display a location whose roster has not arrived yet', () => {
+  const state = applySnapshot(initialState(), snapshot());
+  applyEvent(state, event('location.status_changed', {location_id: 'loc-c', incident_id: null,
+    latitude: 12.97, longitude: 77.59, noise_status: 'normal'}), `${epoch}:1`);
+  assert.equal(state.locations.get('loc-c').streams.length, 1);
+  assert.equal(state.locations.get('loc-c').data_status, 'fresh');
+});
+
+test('long-running monitoring keeps bounded caches and no completed incidents; old cursor replay stays rejected', () => {
+  const state = applySnapshot(initialState(), snapshot());
+  for (let index = 0; index < 3000; index++) {
+    const id = `incident-${index}`;
+    assert.equal(applyEvent(state, event('incident.opened', {event_id: `open-${index}`, incident_id: id}),
+      `${epoch}:${index * 2 + 1}`).kind, 'opening');
+    assert.equal(applyEvent(state, event('incident.resolved', {event_id: `resolved-${index}`, incident_id: id,
+      incident_status: 'resolved', noise_status: 'normal'}), `${epoch}:${index * 2 + 2}`).kind, 'recovery');
+  }
+  assert.equal(state.incidents.size, 0);
+  assert.ok(state.seen.size <= 2048);
+  assert.ok(state.notified.size <= 2048);
+  assert.equal(state.feed.length, 100);
+  assert.equal(state.seen.has('open-0'), false);
+  assert.equal(state.notified.has('incident-0'), false);
+  assert.equal(applyEvent(state, event('incident.opened', {event_id: 'open-0', incident_id: 'incident-0'}), `${epoch}:1`), null);
+  assert.equal(state.incidents.size, 0);
+  assert.equal(state.cursor, `${epoch}:6000`);
+});
+
+test('fresh snapshots release tracking history and suppress openings for every existing incident', () => {
+  const state = applySnapshot(initialState(), snapshot());
+  applyEvent(state, event('incident.opened'), `${epoch}:1`);
+  const next = snapshot();
+  next.cursor = `${epoch}:10000`;
+  next.incidents = Array.from({length: 2100}, (_, index) => ({id: `existing-${index}`,
+    location_id: 'loc-a', stream_id: `existing-stream-${index}`, status: 'active'}));
+  next.incidents.push({id: 'already-completed', location_id: 'loc-a', status: 'resolved'});
+  applySnapshot(state, next);
+  assert.equal(state.seen.size, 0);
+  assert.equal(state.feed.length, 0);
+  assert.ok(state.notified.size <= 2048);
+  assert.equal(state.incidents.size, 2100);
+  assert.equal(state.notified.has('existing-0'), false);
+  // Even more open incidents than the recent-ID cache does not repeat popups.
+  assert.equal(applyEvent(state, event('incident.opened', {event_id: 'existing-opening',
+    incident_id: 'existing-0', stream_id: 'existing-stream-0'}), `${epoch}:10001`), null);
+  assert.equal(applyEvent(state, event('incident.opened'), `${epoch}:1`), null);
+  assert.equal(state.incidents.has('incident-a'), false);
+});
+
+test('events from a different history cannot replace a snapshot cursor or replay old alerts', () => {
+  const state = applySnapshot(initialState(), snapshot());
+  const otherEpoch = 'adc08ac7-1e7f-4a51-8019-aedc64c01e14';
+  assert.equal(applyEvent(state, event('incident.opened'), `${otherEpoch}:1`), null);
+  assert.equal(state.cursor, `${epoch}:0`);
+  assert.equal(state.incidents.size, 0);
+  applySnapshot(state, {...snapshot(), cursor: `${otherEpoch}:0`});
+  assert.equal(applyEvent(state, event('incident.opened'), `${otherEpoch}:1`).kind, 'opening');
 });

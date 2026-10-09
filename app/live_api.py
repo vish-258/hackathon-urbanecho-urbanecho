@@ -99,6 +99,7 @@ def snapshot(location_id=None, device_id=None, limit=50, offset=0, settings=None
                                 "noise_status": state.noise_status, "data_status": "fresh" if fresh else
                                 "invalid" if state.watermark is not None and state.watermark >= cutoff and state.data_status == "invalid" else "stale",
                                 "measurement_value": state.last_value, "measured_at": state.watermark,
+                                "received_at": measurement.received_at if measurement else None,
                                 "measurement_type": measurement.measurement_type if measurement else None,
                                 "weighting": measurement.weighting if measurement else None,
                                 "interval_seconds": measurement.interval_seconds if measurement else None,

@@ -1,6 +1,9 @@
 export const el = (tag, text = '', className = '') => { const node = document.createElement(tag); node.textContent = text; if (className) node.className = className; return node; };
 export function button(text, handler, className = '') { const node = el('button', text, `button ${className}`); node.type = 'button'; if (handler) node.addEventListener('click', handler); return node; }
 export const short = id => id ? String(id).slice(0, 8) : '—';
+export function deviceLabel(record, devices = []) {
+  return record.device_external_id || devices.find(device => device.id === record.device_id)?.external_id || short(record.device_id);
+}
 export const unit = method => method === 'spl_z_leq' ? 'dB SPL (Z)' : method === 'dbfs_rms' ? 'dBFS' : 'Unknown unit';
 export function formatLevel(value, method) { return Number.isFinite(value) ? `${value.toFixed(2)} ${unit(method)}` : 'No eligible reading'; }
 export function formatTime(value, timezone) { if (!value) return 'Not received'; try { return new Intl.DateTimeFormat(undefined, {dateStyle:'medium', timeStyle:'medium', ...(timezone ? {timeZone:timezone} : {})}).format(new Date(value)); } catch { return 'Unknown time'; } }

@@ -156,7 +156,8 @@ def _diagnostic(session, measurement, chunk, device, assignment, rule) -> str | 
         from app.processing import _calibration_offset
         from types import SimpleNamespace
         calibrated_source = SimpleNamespace(calibration=measurement.calibration_snapshot,
-            sample_rate=chunk.sample_rate, captured_at=chunk.captured_at, duration_seconds=chunk.duration_seconds)
+            audio_format=chunk.audio_format, sample_rate=chunk.sample_rate,
+            captured_at=chunk.captured_at, duration_seconds=chunk.duration_seconds)
         calibration = _calibration_offset(calibrated_source)
         if (measurement.calibration_status != "calibrated" or calibration is None
                 or calibration[1] != measurement.calibration_version):

@@ -119,7 +119,7 @@ test('reconnect replay cannot turn a resolved incident back into a live alert', 
   applyEvent(state,event('incident.opened'),`${epoch}:1`);
   applyEvent(state,event('incident.resolved',{event_id:'event-b',incident_status:'resolved',noise_status:'normal',measurement_value:55}),`${epoch}:2`);
   assert.equal(applyEvent(state,event('incident.opened',{event_id:'old-replayed-id'}),`${epoch}:1`),null);
-  assert.equal(state.incidents.get('incident-a').status,'resolved');
+  assert.equal(state.incidents.has('incident-a'),false);
   assert.equal(condition(state.locations.get('location-a')).label,'Within threshold');
 });
 

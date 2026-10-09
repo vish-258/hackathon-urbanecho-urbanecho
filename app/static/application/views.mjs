@@ -1,4 +1,5 @@
-import { el, button, formatLevel, formatTime, short, badge, field, empty, locationName, errorBox, freshnessLabel } from './ui.mjs';
+import { el, button, formatLevel, formatTime, short, badge, field, empty, locationName, errorBox, freshnessLabel, deviceLabel } from './ui.mjs';
+import { liveChanges, mergeChanges, locationChanges, coalesceAsync } from './refresh.mjs';
 
 const PAGE_SIZE = 25;
 const CHART_PAGE = 200;
@@ -182,13 +183,24 @@ function errorMessage(error) {
   return error?.message || 'The server could not complete this request.';
 }
 
-function liveRefresh(ctx, callback) {
-  let timer;
-  const unsubscribe = ctx.onLive?.(() => {
-    if (timer) return;
-    timer = setTimeout(() => { timer = null; if (!ctx.signal?.aborted) callback(); }, 1100);
+function liveRefresh(ctx, callback, accepts = () => true) {
+  let timer, running = false, dirty = false, disposed = false, pending = liveChanges();
+  function schedule() {
+    if (timer || running || disposed || ctx.signal?.aborted) return;
+    timer = setTimeout(async () => {
+      timer = null;
+      if (disposed || ctx.signal?.aborted) return;
+      const changes = pending; pending = liveChanges(); dirty = false; running = true;
+      try { await callback(changes); }
+      catch (error) { if (!disposed && !ctx.signal?.aborted) ctx.notify?.(errorMessage(error)); }
+      finally { running = false; if (dirty) schedule(); }
+    }, 1100);
+  }
+  const unsubscribe = ctx.onLive?.(changes => {
+    if (!accepts(changes)) return;
+    mergeChanges(pending, changes); dirty = true; schedule();
   });
-  return () => { clearTimeout(timer); unsubscribe?.(); };
+  return () => { disposed = true; clearTimeout(timer); unsubscribe?.(); };
 }
 
 function safeApi(ctx, path, options = {}) {
@@ -198,7 +210,7 @@ function safeApi(ctx, path, options = {}) {
 function measurementRows(rows, ctx, timezone) {
   return rows.map(row => [
     stack(formatTime(row.measured_at, timezone), row.measured_at),
-    stack(short(row.device_id), row.location_snapshot?.name || locationName(ctx, row.location_id)),
+    stack(deviceLabel(row, ctx.devices), row.location_snapshot?.name || locationName(ctx, row.location_id)),
     stack(formatLevel(row.value_db, row.measurement_type), isNumber(row.value_db) ? `${row.value_db} ${unit(row.measurement_type)}` : readable(row.calibration_status)),
     formatLevel(row.threshold_value, row.threshold_type),
     stack(readable(row.evaluation?.status || row.quality_status), row.evaluation?.diagnostic ? readable(row.evaluation.diagnostic) : `${row.interval_seconds}s interval`),
@@ -207,7 +219,7 @@ function measurementRows(rows, ctx, timezone) {
 
 function incidentRows(rows, ctx, timezone) {
   return rows.map(row => [
-    stack(link(row.location_snapshot?.name || locationName(ctx, row.location_id), `#/incident/${row.id}`, ctx), `Device ${short(row.device_id)}`),
+    stack(link(row.location_snapshot?.name || locationName(ctx, row.location_id), `#/incident/${row.id}`, ctx), `Device ${deviceLabel(row, ctx.devices)}${deviceLabel(row, ctx.devices) !== short(row.device_id) ? ` · ${short(row.device_id)}` : ''}`),
     formatTime(row.started_at, timezone),
     statusBadge(row.status),
     stack(formatLevel(row.latest_db, row.threshold_type), `Limit ${formatLevel(row.threshold_value, row.threshold_type)}`),
@@ -327,11 +339,12 @@ function chartNode(rows, versions, method, start, end, timezone, fit) {
 
 async function locationView(container, route, ctx) {
   let disposed = false, generation = 0, supportingGeneration = 0, rows = [], versions = [], total = 0, rangeStart, rangeEnd;
-  let dataLimit = CHART_PAGE;
+  let dataLimit = CHART_PAGE, historyDirty = false, currentThreshold = null;
   const location = await safeApi(ctx, `/locations/${encodeURIComponent(route.id)}`);
   let assignedDevices = ctx.devices.filter(device => device.location_id === location.id);
   if (ctx.signal?.aborted) return () => {};
-  container.append(link('← All locations', '#/overview', ctx), heading(location.name, `${Number(location.latitude).toFixed(5)}, ${Number(location.longitude).toFixed(5)} · ${location.timezone}`, 'Location detail'));
+  const title = heading(location.name, `${Number(location.latitude).toFixed(5)}, ${Number(location.longitude).toFixed(5)} · ${location.timezone}`, 'Location detail');
+  container.append(link('← All locations', '#/overview', ctx), title);
   if (/SYNTHETIC|SIMULATED|DEMO/i.test(location.name)) container.append(el('div', 'Simulated location · readings are demonstration data, not calibrated environmental measurements.', 'view-demo-note'));
   const summary = el('div', '', 'view-metric-grid');
   const chartSection = section('Sound levels over time', 'Stored measurements and the threshold that applied at the time.');
@@ -341,7 +354,8 @@ async function locationView(container, route, ctx) {
   method.value = location.threshold_type;
   const fit = el('input'); fit.type = 'checkbox'; fit.checked = true;
   const fitLabel = el('label', '', 'view-check'); fitLabel.append(fit, el('span', 'Fit recorded window'));
-  controls.append(field('Time range', range), field('Measurement', method), fitLabel);
+  const refreshHistory = button('Refresh latest readings', () => { dataLimit = CHART_PAGE; historyDirty = false; void loadHistory(); }, 'secondary');
+  controls.append(field('Time range', range), field('Measurement', method), fitLabel, refreshHistory);
   const chartArea = el('div', '', 'chart-area');
   const chartInfo = el('p', '', 'muted chart-info');
   const chartError = el('div');
@@ -380,9 +394,10 @@ async function locationView(container, route, ctx) {
     if (!assigned.length) devicesBody.append(empty('No assigned devices', 'Register a device in Management to begin receiving recordings.'));
     for (const device of assigned) {
       const stream = streams.filter(item => item.device_id === device.id && item.assignment_id === device.current_assignment_id).sort((a, b) => new Date(b.measured_at || 0) - new Date(a.measured_at || 0))[0];
+      const lastContact = [device.last_contact_at, stream?.received_at].filter(Boolean).sort((a, b) => Date.parse(b) - Date.parse(a))[0];
       const item = el('div', '', 'view-device-row');
-      const identity = el('div'); identity.append(el('strong', device.external_id || device.microphone_model), el('code', device.external_id ? `${device.microphone_model} · ${device.id}` : device.id, 'view-device-id'), el('small', `Last contact: ${device.last_contact_at ? formatTime(device.last_contact_at, location.timezone) : 'Never received'}`, 'muted'));
-      if (device.last_contact_at) identity.lastChild.title = device.last_contact_at;
+      const identity = el('div'); identity.append(el('strong', device.external_id || device.microphone_model), el('code', device.external_id ? `${device.microphone_model} · ${device.id}` : device.id, 'view-device-id'), el('small', `Last contact: ${lastContact ? formatTime(lastContact, location.timezone) : 'Never received'}`, 'muted'));
+      if (lastContact) identity.lastChild.title = lastContact;
       const status = !device.enabled ? 'Disabled' : !stream ? 'No readings yet' : stream.data_status === 'fresh' ? 'Reporting' : readable(stream.data_status);
       item.append(identity, badge(status, status === 'Reporting' ? 'good' : 'neutral'));
       devicesBody.append(item);
@@ -392,57 +407,73 @@ async function locationView(container, route, ctx) {
   function drawHistory() {
     const selectedMethod = method.value;
     chartArea.replaceChildren(chartNode(rows, versions, selectedMethod, rangeStart, rangeEnd, location.timezone, fit.checked));
-    chartInfo.textContent = `${rows.length.toLocaleString()} of ${total.toLocaleString()} saved readings loaded. ${fit.checked ? 'The chart fits the loaded recorded window.' : 'The chart shows the entire selected time range.'} Gaps stay empty. Times use ${location.timezone}.`;
+    historyStatus();
     more.hidden = rows.length >= total;
     more.textContent = `Load ${Math.min(CHART_PAGE, Math.max(0, total - rows.length))} older readings`;
     readingsBody.replaceChildren(rows.length ? table(['Measured at', 'Device / location', 'Sound level', 'Saved threshold', 'Evaluation'], measurementRows(rows, ctx, location.timezone), 'Readings at this location') : empty('No saved readings', 'There are no measurements in this time range.'));
   }
 
-  async function loadHistory() {
+  function historyStatus() {
+    const mode = dataLimit > CHART_PAGE ? 'Browsing a saved snapshot; Refresh latest readings returns to live chart updates.' : 'The latest 200 readings update automatically.';
+    chartInfo.textContent = `${rows.length.toLocaleString()} of ${total.toLocaleString()} saved readings loaded. ${historyDirty ? 'New readings are available. ' : ''}${mode} ${fit.checked ? 'The chart fits the loaded recorded window.' : 'The chart shows the entire selected time range.'} Gaps stay empty. Times use ${location.timezone}.`;
+    refreshHistory.textContent = historyDirty ? 'New readings · Refresh latest' : 'Refresh latest readings';
+  }
+
+  const loadHistory = coalesceAsync(async () => {
     const ownGeneration = ++generation;
+    const requestedRange = range.value, requestedLimit = dataLimit;
     chartError.replaceChildren();
     more.disabled = true;
-    rangeEnd = Date.now(); rangeStart = rangeEnd - Number(range.value) * 3600000;
+    refreshHistory.disabled = true;
+    rangeEnd = Date.now(); rangeStart = rangeEnd - Number(requestedRange) * 3600000;
     const query = new URLSearchParams({ location_id: location.id, since: new Date(rangeStart).toISOString(), until: new Date(rangeEnd).toISOString(), limit: String(CHART_PAGE), offset: '0' });
     try {
       const first = await safeApi(ctx, `/measurements?${query}`);
       const loaded = [...first.items];
-      while (loaded.length < Math.min(first.total, dataLimit)) {
+      while (loaded.length < Math.min(first.total, requestedLimit)) {
+        if (requestedRange !== range.value || requestedLimit !== dataLimit || ctx.signal?.aborted) return;
         query.set('offset', String(loaded.length));
         const page = await safeApi(ctx, `/measurements?${query}`);
         if (!page.items.length) break;
         loaded.push(...page.items);
       }
-      if (disposed || ownGeneration !== generation || ctx.signal?.aborted) return;
+      if (disposed || ownGeneration !== generation || ctx.signal?.aborted || requestedRange !== range.value || requestedLimit !== dataLimit) return;
       rows = loaded; total = first.total;
       drawHistory();
     } catch (error) { if (!ctx.signal?.aborted && !disposed && ownGeneration === generation) chartError.append(errorBox(errorMessage(error))); }
-    finally { if (!disposed && ownGeneration === generation) more.disabled = false; }
-  }
+    finally { if (!disposed && ownGeneration === generation) { more.disabled = false; refreshHistory.disabled = false; } }
+  }, ctx.signal);
 
-  async function loadSupporting() {
+  const loadSupporting = coalesceAsync(async () => {
     const ownGeneration = ++supportingGeneration;
     try {
       const deviceIds = [...new Set([...(ctx.state.locations.get(location.id)?.devices || []).map(device => device.id), ...ctx.devices.filter(device => device.location_id === location.id).map(device => device.id)])];
-      const [threshold, history, incidents, devices] = await Promise.all([
+      const [threshold, history, devices] = await Promise.all([
         safeApi(ctx, `/locations/${location.id}/threshold`),
         safeApi(ctx, `/locations/${location.id}/threshold/versions?limit=200`),
-        safeApi(ctx, `/incidents?location_id=${location.id}&limit=5`),
         Promise.all(deviceIds.map(id => safeApi(ctx, `/devices/${id}`))),
       ]);
       if (disposed || ctx.signal?.aborted || ownGeneration !== supportingGeneration) return;
       assignedDevices = devices.filter(device => device.location_id === location.id);
       versions = history.items;
-      renderSummary(threshold);
+      currentThreshold = threshold;
+      renderSummary(currentThreshold);
       thresholdBody.replaceChildren();
       if (versions.length) thresholdBody.append(table(['Effective from', 'Threshold', 'Revision'], versions.slice(0, 5).map(rule => [formatTime(rule.effective_at, location.timezone), formatLevel(rule.threshold_value, rule.threshold_type), String(rule.revision)]), 'Recent threshold revisions'));
       else thresholdBody.append(empty('No threshold revisions', 'A location threshold has not been configured.'));
       if (history.total > versions.length) thresholdBody.append(el('p', `Loaded the latest ${versions.length} of ${history.total} revisions. Older threshold lines may be unavailable; each reading retains its saved threshold.`, 'muted'));
       else if (versions.length > 5) thresholdBody.append(el('p', `Showing the latest 5 of ${versions.length} revisions. All loaded revisions are used in the chart.`, 'muted'));
-      recentBody.replaceChildren(incidents.items.length ? incidentTable(incidents.items, ctx, location.timezone) : empty('No incidents yet', 'Threshold breaches will appear here once they have been evaluated.'));
       if (rows.length) drawHistory();
     } catch (error) { if (!disposed && !ctx.signal?.aborted && ownGeneration === supportingGeneration) { thresholdBody.replaceChildren(errorBox(errorMessage(error))); renderSummary(null); } }
-  }
+  }, ctx.signal);
+
+  const loadIncidents = coalesceAsync(async () => {
+    try {
+      const incidents = await safeApi(ctx, `/incidents?location_id=${location.id}&limit=5`);
+      if (disposed || ctx.signal?.aborted) return;
+      recentBody.replaceChildren(incidents.items.length ? incidentTable(incidents.items, ctx, location.timezone) : empty('No incidents yet', 'Threshold breaches will appear here once they have been evaluated.'));
+    } catch (error) { if (!disposed && !ctx.signal?.aborted) recentBody.replaceChildren(errorBox(errorMessage(error))); }
+  }, ctx.signal);
 
   let dailyTimer;
   async function loadDaily() {
@@ -461,12 +492,27 @@ async function locationView(container, route, ctx) {
     } catch (error) { if (!disposed && !ctx.signal?.aborted) dailyBody.replaceChildren(errorBox(errorMessage(error))); }
   }
 
-  range.addEventListener('change', () => { dataLimit = CHART_PAGE; loadHistory(); });
+  range.addEventListener('change', () => { dataLimit = CHART_PAGE; historyDirty = false; void loadHistory(); });
   method.addEventListener('change', drawHistory);
   fit.addEventListener('change', drawHistory);
-  const stopLive = liveRefresh(ctx, () => { loadSupporting(); loadHistory(); });
+  const stopLive = liveRefresh(ctx, async changes => {
+    const affected = locationChanges(changes, location.id), pending = [];
+    if (affected.summary) renderSummary(currentThreshold);
+    if (affected.supporting) {
+      Object.assign(location, ctx.locations.find(item => item.id === location.id) || {});
+      title.querySelector('h1').textContent = location.name;
+      title.querySelector('p.muted').textContent = `${Number(location.latitude).toFixed(5)}, ${Number(location.longitude).toFixed(5)} · ${location.timezone}`;
+      pending.push(loadSupporting());
+    }
+    if (affected.incidents) pending.push(loadIncidents());
+    if (affected.history) {
+      if (dataLimit === CHART_PAGE) pending.push(loadHistory());
+      else { historyDirty = true; historyStatus(); }
+    }
+    await Promise.all(pending);
+  }, changes => Object.values(locationChanges(changes, location.id)).some(Boolean));
   chartArea.append(el('p', 'Loading saved readings…', 'muted'));
-  await Promise.all([loadSupporting(), loadHistory(), loadDaily()]);
+  await Promise.all([loadSupporting(), loadHistory(), loadIncidents(), loadDaily()]);
   return () => { disposed = true; generation++; clearTimeout(dailyTimer); stopLive(); };
 }
 
@@ -474,9 +520,9 @@ async function incidentsView(container, route, ctx) {
   let disposed = false, offset = 0, generation = 0, total = 0;
   const queryFromHash = new URLSearchParams(location.hash.split('?')[1] || '');
   container.append(heading('Incident history', 'Follow every excessive-noise event, from its first breach to its resolution.', 'Records'));
-  const panel = section('Saved incidents', 'Search includes the current and historical location name, device identity, and microphone model.');
+  const panel = section('Saved incidents', 'Search by location name, device code (for example UE-001), internal device ID, or microphone model. Historical location names are included.');
   const filters = el('form', '', 'view-filter-grid');
-  const search = el('input'); search.type = 'search'; search.placeholder = 'Location name or device ID'; search.maxLength = 200;
+  const search = el('input'); search.type = 'search'; search.placeholder = 'Location or device code, e.g. UE-001'; search.maxLength = 200;
   const locationSelect = select([['', 'All locations'], ...ctx.locations.map(item => [item.id, item.name])], 'Filter incidents by location');
   locationSelect.value = route.location || queryFromHash.get('location') || '';
   const status = select([['', 'All statuses'], ['active', 'Active'], ['recovering', 'Recovering'], ['resolved', 'Resolved'], ['closed', 'Closed']], 'Filter incidents by status');
@@ -505,12 +551,13 @@ async function incidentsView(container, route, ctx) {
     if (applied.to) values.set('until', `${applied.to}T23:59:59.999999Z`);
     return values;
   }
-  async function load() {
+  const load = coalesceAsync(async () => {
     const ownGeneration = ++generation;
+    const requestedQuery = params().toString();
     feedback.replaceChildren(); apply.disabled = true;
     try {
-      const result = await safeApi(ctx, `/incidents?${params()}`);
-      if (disposed || ownGeneration !== generation || ctx.signal?.aborted) return;
+      const result = await safeApi(ctx, `/incidents?${requestedQuery}`);
+      if (disposed || ownGeneration !== generation || ctx.signal?.aborted || requestedQuery !== params().toString()) return;
       total = result.total;
       body.replaceChildren(result.items.length ? incidentTable(result.items, ctx, 'UTC') : empty('No matching incidents', 'Try another date range, location, or status. No results does not mean the location has recorded complete coverage.'));
       count.textContent = total ? `${offset + 1}–${Math.min(offset + PAGE_SIZE, total)} of ${total} incidents · times in UTC` : '0 incidents · times in UTC';
@@ -518,14 +565,14 @@ async function incidentsView(container, route, ctx) {
       next.disabled = offset + PAGE_SIZE >= total;
     } catch (error) { if (!disposed && !ctx.signal?.aborted && ownGeneration === generation) feedback.append(errorBox(errorMessage(error))); }
     finally { if (!disposed && ownGeneration === generation) apply.disabled = false; }
-  }
+  }, ctx.signal);
   filters.addEventListener('submit', event => {
     event.preventDefault();
     if (from.value && to.value && from.value > to.value) { feedback.replaceChildren(errorBox('The start date must be on or before the end date.')); return; }
     applied = { q: search.value.trim(), location: locationSelect.value, status: status.value, from: from.value, to: to.value };
     offset = 0; load();
   });
-  const stopLive = liveRefresh(ctx, load);
+  const stopLive = liveRefresh(ctx, load, changes => changes?.metadata || (applied.location ? changes?.incidentLocations.has(applied.location) : !!changes?.incidents.size));
   body.append(el('p', 'Loading saved incidents…', 'muted'));
   await load();
   return () => { disposed = true; generation++; stopLive(); };
@@ -548,15 +595,16 @@ async function incidentView(container, route, ctx) {
   const pages = el('div', '', 'view-pagination-buttons'); pages.append(previous, next); footer.append(count, pages);
   readings.append(feedback, body, footer);
   container.append(title, summary, identity, readings);
-  async function load() {
+  const load = coalesceAsync(async () => {
     const ownGeneration = ++generation;
+    const requestedOffset = offset;
     feedback.replaceChildren();
     try {
       const [record, related] = await Promise.all([
         safeApi(ctx, `/incidents/${route.id}`),
-        safeApi(ctx, `/incidents/${route.id}/measurements?limit=${PAGE_SIZE}&offset=${offset}`),
+        safeApi(ctx, `/incidents/${route.id}/measurements?limit=${PAGE_SIZE}&offset=${requestedOffset}`),
       ]);
-      if (disposed || ctx.signal?.aborted || ownGeneration !== generation) return;
+      if (disposed || ctx.signal?.aborted || ownGeneration !== generation || requestedOffset !== offset) return;
       const timezone = record.location_snapshot?.timezone || ctx.locations.find(item => item.id === record.location_id)?.timezone || 'UTC';
       const name = record.location_snapshot?.name || locationName(ctx, record.location_id);
       title.querySelector('h1').textContent = name;
@@ -564,7 +612,8 @@ async function incidentView(container, route, ctx) {
       const descriptions = el('dl', '', 'view-record-grid');
       for (const [label, value] of [
         ['Location', link(name, `#/location/${record.location_id}`, ctx)],
-        ['Device identity', record.device_id],
+        ['Device code', record.device_external_id || ctx.devices.find(device => device.id === record.device_id)?.external_id || 'Not assigned'],
+        ['Internal device ID', record.device_id],
         ['Started', formatTime(record.started_at, timezone)],
         ['Resolved / closed', record.ended_at ? formatTime(record.ended_at, timezone) : 'Not resolved'],
         ['Latest evaluated level', formatLevel(record.latest_db, record.threshold_type)],
@@ -581,8 +630,8 @@ async function incidentView(container, route, ctx) {
       count.textContent = related.total ? `${offset + 1}–${Math.min(offset + PAGE_SIZE, related.total)} of ${related.total} readings` : '0 associated readings';
       previous.disabled = offset === 0; next.disabled = offset + PAGE_SIZE >= related.total;
     } catch (error) { if (!disposed && !ctx.signal?.aborted && ownGeneration === generation) feedback.append(errorBox(errorMessage(error))); }
-  }
-  const stopLive = liveRefresh(ctx, load);
+  }, ctx.signal);
+  const stopLive = liveRefresh(ctx, load, changes => changes?.metadata || changes?.incidents.has(route.id));
   await load();
   return () => { disposed = true; generation++; stopLive(); };
 }
