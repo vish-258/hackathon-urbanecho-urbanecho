@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {condition, latest, formatLevel, freshnessLabel} from '../app/static/application/ui.mjs';
+import {condition, latest, formatLevel, freshnessLabel, deviceReporting} from '../app/static/application/ui.mjs';
 import {initialState, applySnapshot, applyEvent, ageData} from '../app/static/state.mjs';
 
 const epoch = 'c38f4b87-b77c-4a9c-b7d9-d91da94bfb17';
@@ -42,6 +42,19 @@ test('a fresh device alongside a silent replay device shows partial reporting, n
   assert.equal(freshnessLabel(location),'Some devices not reporting');
   location.streams[0].data_status='stale';
   assert.equal(freshnessLabel(location),'No recent data');
+});
+
+test('one unusable reading keeps a device reporting but flags attention; staleness does not', () => {
+  const location=normal(), device={id:'device-a', current_assignment_id:'assignment-a', enabled:true};
+  assert.deepEqual(deviceReporting(device,location),{reporting:true,attention:false});
+  location.streams[0].data_status='invalid';
+  assert.deepEqual(deviceReporting(device,location),{reporting:true,attention:true});
+  location.streams[0].data_status='stale';
+  assert.deepEqual(deviceReporting(device,location),{reporting:false,attention:false});
+  location.streams[0].data_status='invalid';
+  assert.equal(deviceReporting({...device,enabled:false},location).reporting,false);
+  assert.equal(deviceReporting({...device,current_assignment_id:'new-assignment'},location).reporting,false);
+  assert.equal(deviceReporting(device,undefined).reporting,false);
 });
 
 test('disabled devices and former assignments cannot make a stale location appear partly reporting', () => {

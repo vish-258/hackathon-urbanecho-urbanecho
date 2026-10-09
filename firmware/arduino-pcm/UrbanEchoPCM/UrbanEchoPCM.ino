@@ -5,12 +5,14 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ESP_I2S.h>
+#include <Preferences.h>
 #include <atomic>
 #include <math.h>
 #include <stdarg.h>
 #include <time.h>
 #include <sys/time.h>
 #include "cJSON.h"
+#include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_sntp.h"
 #include "esp_timer.h"
@@ -61,6 +63,12 @@ portMUX_TYPE stateLock = portMUX_INITIALIZER_UNLOCKED;
 int64_t lastSyncUs = 0;
 int64_t dmaOriginUs = 0;
 uint32_t dmaOverflows = 0;
+// Empty UE_DEVICE_ID/UE_DEVICE_TOKEN let one firmware serve every board: the ID comes from
+// the chip MAC and the token from NVS, written over USB by scripts/provision-board.py.
+char deviceId[37]{};
+char deviceToken[129]{};
+constexpr char NVS_NAMESPACE[] = "urbanecho";
+constexpr char NVS_TOKEN_KEY[] = "token";
 
 String baseUrl() {
   String url = String(UE_USE_HTTPS ? "https://" : "http://") + UE_HOST;
@@ -91,6 +99,56 @@ bool validDeviceId(const char* value) {
   return true;
 }
 
+bool validToken(const char* value) {
+  size_t length = strlen(value);
+  if (length < 16 || length >= sizeof(deviceToken)) return false;
+  for (size_t i = 0; i < length; ++i) {
+    unsigned char ch = static_cast<unsigned char>(value[i]);
+    if (!isalnum(ch) && ch != '_' && ch != '-') return false;
+  }
+  return true;
+}
+
+void resolveIdentity() {
+  if (UE_DEVICE_ID[0]) snprintf(deviceId, sizeof(deviceId), "%s", UE_DEVICE_ID);
+  else {
+    uint8_t mac[6]{};
+    esp_efuse_mac_get_default(mac);
+    snprintf(deviceId, sizeof(deviceId), "ESP-%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  }
+  if (UE_DEVICE_TOKEN[0]) snprintf(deviceToken, sizeof(deviceToken), "%s", UE_DEVICE_TOKEN);
+  else {
+    Preferences prefs;
+    if (prefs.begin(NVS_NAMESPACE, true)) prefs.getString(NVS_TOKEN_KEY, deviceToken, sizeof(deviceToken));
+    prefs.end();
+    if (!validToken(deviceToken)) deviceToken[0] = '\0';
+  }
+}
+
+void printIdentity() {
+  Serial.printf("IDENTITY %s %s\n", deviceId, deviceToken[0] ? "provisioned" : "unprovisioned");
+}
+
+// Provisioning commands stay on the board: never echoed, logged or forwarded to /text.
+bool handleCommand(const char* line) {
+  if (!strcmp(line, "IDENTITY")) { printIdentity(); return true; }
+  bool forget = !strcmp(line, "FORGET");
+  if (!forget && strncmp(line, "PROVISION ", 10)) return false;
+  if (UE_DEVICE_TOKEN[0]) { Serial.println("PROVISION REFUSED: token is compiled into this firmware"); return true; }
+  if (!forget && !validToken(line + 10)) { Serial.println("PROVISION REFUSED: invalid token format"); return true; }
+  Preferences prefs;
+  bool stored = prefs.begin(NVS_NAMESPACE, false) &&
+    (forget ? prefs.remove(NVS_TOKEN_KEY) || !prefs.isKey(NVS_TOKEN_KEY)
+            : prefs.putString(NVS_TOKEN_KEY, line + 10) == strlen(line + 10));
+  prefs.end();
+  if (!stored) { Serial.println("PROVISION REFUSED: could not store token"); return true; }
+  Serial.printf("%s %s: restarting\n", forget ? "FORGOTTEN" : "PROVISIONED", deviceId);
+  Serial.flush();
+  delay(200);
+  ESP.restart();
+  return true;
+}
+
 void postStatus(const char* fmt, ...) {
   StatusMsg msg{};
   va_list args;
@@ -99,6 +157,25 @@ void postStatus(const char* fmt, ...) {
   va_end(args);
   Serial.printf("STATUS: %s\n", msg.text);
   if (!statusQ || xQueueSend(statusQ, &msg, 0) != pdTRUE) ++droppedStatus;
+}
+
+void pollSerial(bool forward) {
+  static char line[192]{};
+  static size_t length = 0;
+  static bool overflow = false;
+  while (Serial.available()) {
+    char ch = char(Serial.read());
+    if (ch == '\n') {
+      line[length] = '\0';
+      // A truncated line could store a partial token; drop it entirely.
+      if (!overflow && length && !handleCommand(line) && forward) postStatus("%s", line);
+      length = 0;
+      overflow = false;
+    } else if (ch != '\r') {
+      if (length + 1 < sizeof(line)) line[length++] = ch;
+      else overflow = true;
+    }
+  }
 }
 
 void onClockSync(struct timeval*) {
@@ -192,8 +269,8 @@ bool beginRequest(HTTPClient& http, WiFiClient& plain, WiFiClientSecure& secure,
   http.setTimeout(UE_HTTP_TIMEOUT_MS);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
   http.setReuse(false);
-  http.addHeader("Authorization", String("Bearer ") + UE_DEVICE_TOKEN);
-  http.addHeader("X-Device-Id", UE_DEVICE_ID);
+  http.addHeader("Authorization", String("Bearer ") + deviceToken);
+  http.addHeader("X-Device-Id", deviceId);
   return true;
 }
 
@@ -399,12 +476,22 @@ void uploadTask(void*) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  bool configured = UE_CONFIGURED && validDeviceId(UE_DEVICE_ID) && strlen(UE_DEVICE_TOKEN) >= 16 &&
-    strlen(UE_WIFI_SSID) > 0 && !strstr(UE_HOST, "YOUR_") && !strstr(UE_HOST, "://") && !strchr(UE_HOST, '/') &&
+  resolveIdentity();
+  bool configured = UE_CONFIGURED && strlen(UE_WIFI_SSID) > 0 && !strstr(UE_HOST, "YOUR_") && !strstr(UE_HOST, "://") && !strchr(UE_HOST, '/') &&
     (UE_USE_HTTPS ? strncmp(UE_CA_CERT, "-----BEGIN CERTIFICATE-----", 27) == 0 && !strstr(UE_CA_CERT, "PASTE_") : UE_ALLOW_HTTP_BENCH);
-  if (!configured) {
-    Serial.println("Not provisioned. Copy config.example.h to privateconfig.h and complete the private settings.");
-    while (true) delay(1000);
+  if (!configured || !validDeviceId(deviceId)) {
+    Serial.println(configured ? "Invalid UE_DEVICE_ID: use 1-32 letters, digits, _ or -, or leave it empty for the chip ID."
+                              : "Not configured. Copy config.example.h to privateconfig.h and complete the shared settings.");
+    while (true) { pollSerial(false); delay(20); }
+  }
+  printIdentity();
+  for (uint32_t lastHint = 0; !deviceToken[0]; delay(20)) {
+    // Tokens arrive only over USB; PROVISION restarts the board once stored.
+    if (!lastHint || millis() - lastHint >= 5000) {
+      Serial.printf("UNPROVISIONED %s: with this board on USB run: python3 scripts/provision-board.py --location \"NAME\"\n", deviceId);
+      lastHint = millis();
+    }
+    pollSerial(false);
   }
   freeQ = xQueueCreate(BUFFER_SLOTS, sizeof(uint8_t));
   readyQ = xQueueCreate(BUFFER_SLOTS, sizeof(uint8_t));
@@ -424,7 +511,7 @@ void setup() {
   sntp_set_time_sync_notification_cb(onClockSync);
   configTime(0, 0, UE_SNTP_SERVER, UE_SNTP_BACKUP);
   esp_sntp_set_sync_interval(15UL * 60 * 1000);
-  postStatus("BOOT: %s; session=%s; PCM16 mono 16000Hz 1s gain %.1f UNCALIBRATED", UE_DEVICE_ID, sessionId, double(UE_GAIN));
+  postStatus("BOOT: %s; session=%s; PCM16 mono 16000Hz 1s gain %.1f UNCALIBRATED", deviceId, sessionId, double(UE_GAIN));
   Serial.printf("Audio endpoint: %s/upload. Waiting for Wi-Fi and synchronized UTC.\n", baseUrl().c_str());
   if (xTaskCreatePinnedToCore(captureTask, "capture", 6144, nullptr, 3, nullptr, 1) != pdPASS ||
       xTaskCreatePinnedToCore(uploadTask, "upload", 12288, nullptr, 2, nullptr, 0) != pdPASS) {
@@ -435,12 +522,6 @@ void setup() {
 
 void loop() {
   // Queue bounded serial diagnostics rather than opening a competing HTTP connection.
-  static char line[128]{};
-  static size_t length = 0;
-  while (Serial.available()) {
-    char ch = char(Serial.read());
-    if (ch == '\n') { line[length] = '\0'; if (length) postStatus("%s", line); length = 0; }
-    else if (ch != '\r' && length + 1 < sizeof(line)) line[length++] = ch;
-  }
+  pollSerial(true);
   vTaskDelay(pdMS_TO_TICKS(20));
 }

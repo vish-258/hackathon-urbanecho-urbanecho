@@ -15,8 +15,8 @@ Copy `config.example.h` to **`privateconfig.h` in this same folder**. Fill in th
 | `UE_HOST` | The **UrbanEcho server computer's reachable LAN IP or hostname**, without `http://`, `https://`, port or path; never `localhost` |
 | `UE_USE_HTTPS`, `UE_PORT` | Default: `true`, `8443`, matching the optional local hardware listener |
 | `UE_CA_CERT` | That listener's **public CA certificate**; its certificate must match `UE_HOST` |
-| `UE_DEVICE_ID` | Keep the hardware ID, for example `UE-001`; first map this ID to a registered device and location in UrbanEcho |
-| `UE_DEVICE_TOKEN` | The private credential issued to **that same registered device** |
+| `UE_DEVICE_ID` | Leave empty (default) so the board identifies itself as `ESP-<chip MAC>` and one firmware fits every board; or set a registered code such as `UE-001` to pin one board |
+| `UE_DEVICE_TOKEN` | Leave empty (default) to use the token stored on the board by `scripts/provision-board.py`; or set the credential issued to the pinned `UE_DEVICE_ID` |
 | `UE_CAPTURE_INTERVAL_MS` | `1000` for continuous one-second recordings; larger intervals intentionally leave gaps |
 | `UE_UPLOAD_INTERVAL_MS` | `0` sends each available recording promptly; a positive value imposes a minimum pause between uploads and can fill the queue |
 | `UE_GAIN` | `16.0f` preserves the prototype gain; reduce if the PCM output clips; changing gain changes the measurement chain |
@@ -24,6 +24,18 @@ Copy `config.example.h` to **`privateconfig.h` in this same folder**. Fill in th
 For an explicitly isolated HTTP bench setup, use `UE_USE_HTTPS=false`, the reachable HTTP listener port, and `UE_ALLOW_HTTP_BENCH=true`. This opt-in sends the credential/audio without transport encryption. It does not expose a server automatically: a service bound only to `127.0.0.1:8000` cannot be reached by the ESP32. The default remains verified HTTPS; there is no certificate-bypass option.
 
 Do not paste secrets into chat, include `privateconfig.h` in a shared ZIP, or share a binary compiled from real settings. Wi-Fi details and the device credential are embedded in that provisioned binary. The public source package contains placeholders only.
+
+## One firmware for every board
+
+With `UE_DEVICE_ID` and `UE_DEVICE_TOKEN` left empty, the same build can be flashed onto any board. Each board names itself `ESP-<chip MAC>` (for example `ESP-20500D114084`) and keeps its own token in NVS flash. A MAC address is not secret, so the per-board token is still required. Provision each new board once, from the project root, with the board on USB and no serial monitor open:
+
+```sh
+python3 scripts/provision-board.py --location "Location name from Management"
+```
+
+The script asks the board for its ID over USB, registers that ID at the location, saves a private backup in `.local/devices/<ID>.json`, sends the token to the board, and waits for its first upload. It never prints the token. Running it again for a provisioned board changes nothing. If the board loses its token (for example after a full flash erase), the script restores it from the backup; the server cannot reveal a token again. Re-flashing the firmware keeps the stored token.
+
+Serial commands handled by the board itself, never forwarded to the server: `IDENTITY` prints the ID and whether a token is stored; `PROVISION <token>` stores a token and restarts; `FORGET` removes the stored token and restarts. An unprovisioned board prints its ID every five seconds and does not record audio. Move a provisioned board to another location in **Management → Devices → Edit mapping**; no re-provisioning is needed.
 
 ## Device ID determines location on the server
 

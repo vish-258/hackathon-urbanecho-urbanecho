@@ -40,3 +40,6 @@ firmware/**/sdkconfig.old
 recordings/
 .coverage
 htmlcov/
+# PlatformIO build output embeds privateconfig.h secrets
+firmware/**/.pio/
+firmware/**/.vscode/

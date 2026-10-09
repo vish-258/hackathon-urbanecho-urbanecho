@@ -398,7 +398,7 @@ async function locationView(container, route, ctx) {
       const item = el('div', '', 'view-device-row');
       const identity = el('div'); identity.append(el('strong', device.external_id || device.microphone_model), el('code', device.external_id ? `${device.microphone_model} · ${device.id}` : device.id, 'view-device-id'), el('small', `Last contact: ${lastContact ? formatTime(lastContact, location.timezone) : 'Never received'}`, 'muted'));
       if (lastContact) identity.lastChild.title = lastContact;
-      const status = !device.enabled ? 'Disabled' : !stream ? 'No readings yet' : stream.data_status === 'fresh' ? 'Reporting' : readable(stream.data_status);
+      const status = !device.enabled ? 'Disabled' : !stream ? 'No readings yet' : stream.data_status === 'fresh' ? 'Reporting' : stream.data_status === 'invalid' ? 'Reporting · latest reading unusable' : readable(stream.data_status);
       item.append(identity, badge(status, status === 'Reporting' ? 'good' : 'neutral'));
       devicesBody.append(item);
     }

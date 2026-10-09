@@ -21,6 +21,13 @@ export function freshnessLabel(location) {
    (location.devices || []).some(device => device.enabled && device.id === stream.device_id && device.assignment_id === stream.assignment_id));
  return hasReportingDevice ? 'Some devices not reporting' : 'No recent data';
 }
+// Reporting means a usable reading inside the server's stale window. The server marks
+// a stream 'invalid' when its newest reading is unusable (e.g. clipped) but a usable one
+// is still inside that window, so one bad second flags attention without dropping the device.
+export function deviceReporting(device, location) {
+ const streams = device?.enabled ? (location?.streams || []).filter(s => s.device_id === device.id && s.assignment_id === device.current_assignment_id) : [];
+ return {reporting: streams.some(s => ['fresh','invalid'].includes(s.data_status)), attention: streams.some(s => s.data_status === 'invalid')};
+}
 export function condition(location) {
  const unresolved = (location?.unresolved_incident_ids || []).length > 0;
  const stale = !location?.data_status || ['stale','unknown'].includes(location.data_status);

@@ -45,6 +45,25 @@ def test_tls_setup_creates_verified_san_and_preserves_existing_keys(tmp_path):
     assert (destination / 'server.key').read_bytes() == original
 
 
+def test_tls_setup_reuses_trusted_ca_for_a_new_network(tmp_path):
+    if not shutil.which('openssl'):
+        pytest.skip('OpenSSL CLI unavailable in this runtime; run this check on the host')
+    path = Path(__file__).resolve().parents[1] / 'scripts/setup-hardware-tls.py'
+    spec = importlib.util.spec_from_file_location('tls_setup', path)
+    setup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(setup)
+    original = setup.prepare('10.22.197.114', tmp_path / 'first')
+    with pytest.raises(ValueError):
+        setup.prepare('192.168.14.161', tmp_path / 'bad', also=['8.8.8.8'], ca_from=original)
+    moved = setup.prepare('192.168.14.161', tmp_path / 'second', also=['10.22.197.114'], ca_from=original)
+    assert (moved / 'ca.crt').read_bytes() == (original / 'ca.crt').read_bytes()
+    assert not (moved / 'signing-private').exists()
+    assert 'HARDWARE_BIND_IP=192.168.14.161' in (moved / 'listener.env').read_text()
+    names = ssl._ssl._test_decode_cert(str(moved / 'server.crt'))['subjectAltName']
+    assert {('IP Address', '192.168.14.161'), ('IP Address', '10.22.197.114'), ('IP Address', '127.0.0.1')} <= set(names)
+    ssl.create_default_context(cafile=str(original / 'ca.crt')).load_verify_locations(cafile=str(moved / 'ca.crt'))
+
+
 @pytest.mark.integration
 def test_device_listener_ingests_via_existing_pipeline_without_admin_routes(client, admin_headers, settings):
     from app.device_api import create_device_app

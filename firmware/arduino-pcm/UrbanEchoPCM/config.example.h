@@ -11,10 +11,12 @@ constexpr unsigned short UE_PORT = 8443;
 // Explicit opt-in for an isolated bench LAN only; credentials are cleartext on HTTP.
 constexpr bool UE_ALLOW_HTTP_BENCH = false;
 
-// Keep the human-readable ID already on the physical device. Map it to a registered
-// device/location in UrbanEcho Management. IDs are not credentials; token is still required.
-constexpr char UE_DEVICE_ID[] = "UE-001";
-constexpr char UE_DEVICE_TOKEN[] = "REGISTERED_DEVICE_BEARER_TOKEN";
+// Leave both empty so this one firmware fits every board: the board identifies itself as
+// ESP-<chip MAC> and uses the token that scripts/provision-board.py stores on it over USB.
+// A MAC is not a secret, so the per-board token is still required.
+// To pin one board instead, set a registered code such as "UE-001" and its token here.
+constexpr char UE_DEVICE_ID[] = "";
+constexpr char UE_DEVICE_TOKEN[] = "";
 constexpr char UE_CA_CERT[] = R"PEM(-----BEGIN CERTIFICATE-----
 PASTE_SERVER_CA_CERTIFICATE_HERE
 -----END CERTIFICATE-----
