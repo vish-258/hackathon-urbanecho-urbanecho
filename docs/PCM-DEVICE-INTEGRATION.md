@@ -1,15 +1,15 @@
 # Arduino device IDs and PCM integration
 
-This update adapts the supplied ESP32/INMP441 sender to UrbanEcho. The board sends its existing code, such as `UE-001`; the server stores the geographic mapping. The old standalone Python test server is no longer needed for this flow. The existing PCM24 `/audio` API and simulator remain supported.
+This update adapts the supplied ESP32/INMP441 sender to UrbanEcho. The board derives its identity from its factory MAC as `ESP-<12 uppercase hex digits>`; the server stores the geographic mapping. A manually entered device ID is no longer used by the Arduino sketch. The old standalone Python test server is no longer needed for this flow. The existing PCM24 `/audio` API and simulator remain supported.
 
 ## Register the mapping once
 
 1. Open the local application, **Management → Locations**, and create the actual place with its coordinates and timezone if it does not exist.
-2. Open **Management → Devices**. Enter the code physically configured on the board, select the location, and register. The table shows **Device ID → location → coordinates**.
-3. Save the device credential displayed once. Put that credential and the matching code into the sketch's private settings file. The app continues to open locally without asking for an administrator token; this separate device credential authenticates uploads.
+2. Flash the shared Arduino firmware with Wi-Fi/server settings completed and `UE_DEVICE_TOKEN` empty, then run `python3 scripts/provision-board.py --location "Physical location name"` from the project root while the board is connected over USB. Close any serial monitor first.
+3. The script reads the board’s MAC-based identity, registers it, saves a private credential backup, and stores that credential on the board. It then confirms a newly saved audio recording and reports processing separately. Diagnostics alone cannot count as audio upload success. **Management → Devices** shows **Device ID → location → coordinates**. The app continues to open locally without asking for an administrator token.
 4. For a moved device, use **Edit mapping**. No firmware location change is necessary. Older recordings, including late uploads, retain the assignment valid at capture time.
 
-Codes are case-sensitive, unique, and use 1–32 ASCII letters, numbers, `_` or `-`. A 32-character hexadecimal code is reserved for UUID compatibility. Existing UUID-based devices continue working without changes. Unknown IDs are rejected: receiving a new ID does not silently create a device or invent its location. A code is immutable after registration; its location remains editable.
+The example MAC above is illustrative; use the connected board’s reported identity. Codes are case-sensitive, unique, and use 1–32 ASCII letters, numbers, `_` or `-`. A 32-character hexadecimal code is reserved for UUID compatibility. Existing UUID-based devices continue working without changes. Unknown IDs are rejected: receiving a new ID does not silently create a device or invent its location. A code is immutable after registration; its location remains editable.
 
 The `devices` table holds `external_id` and its current location reference; `locations` holds the coordinates/timezone, and `device_assignments` holds historical assignments. The additive `0005_device_external_id` migration preserves existing device IDs, credentials and stored history. API registration accepts `external_id` on `POST /devices`; location changes use the existing revision-checked `PATCH /devices/{internal_uuid}`.
 
@@ -36,7 +36,7 @@ Each `/upload` request requires:
 
 ```text
 Authorization: Bearer <the registered device credential>
-X-Device-ID: UE-001
+X-Device-ID: ESP-20500D114084
 X-Session: <stable random identifier for this boot, 1–32 safe characters>
 X-Seq: <nonnegative sequence number, unchanged on retry>
 X-Captured-At: <capture START in UTC, for example 2026-10-09T12:00:00.123456Z>
@@ -74,4 +74,4 @@ SPL requires calibration of the complete microphone/gain/filter chain, explicitl
 
 After flashing, check in order: serial Wi-Fi/time readiness; authenticated saved recording ID; the mapped location's latest reading and original audio; an eligible breach and configured recovery; a repeated request with no extra recording; then today's daily report. A failed/late/invalid recording must not manufacture a current alert. Receiving bytes and compiling firmware do **not** establish microphone accuracy or physical-device success.
 
-See the [verification report](PCM-INTEGRATION-VERIFICATION.md) for the checks actually performed. Physical flashing, Wi-Fi operation, timing accuracy, real sound capture and acoustic calibration remain pending on the user's board.
+The [earlier verification report](PCM-INTEGRATION-VERIFICATION.md) retains its original dated scope. On 10 October 2026, one connected board was flashed, provisioned using its MAC-derived identity, and verified through original audio checksum, processed readings, incidents/recovery, and a recorded-data daily summary. Uploads used Wi-Fi and verified local TLS. Absolute timing accuracy, controlled Wi-Fi outage behavior, geographic position, and acoustic calibration still need independent checks.

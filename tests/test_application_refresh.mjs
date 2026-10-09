@@ -70,6 +70,7 @@ class Element {
   append(...children) { this.children.push(...children); if (this.tag === 'select' && !this.value && children[0]) this.value = children[0].value; }
   replaceChildren(...children) { this._text = ''; this.children = []; this.append(...children); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  removeAttribute(name) { delete this.attributes[name]; if (name === 'src') this.src = ''; }
   addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); }
   get lastChild() { return this.children.at(-1); }
   all() { return this.children.flatMap(child => child instanceof Element ? [child, ...child.all()] : []); }
@@ -93,7 +94,7 @@ function fixture() {
   const device = { id: 'device-1', external_id: 'UE-001', location_id: location.id, enabled: true, current_assignment_id: 'assignment', microphone_model: 'INMP441' };
   const listeners = new Set(), requests = [], controller = new AbortController();
   const ctx = { locations: [location], devices: [device], signal: controller.signal, navigate() {},
-    state: { locations: new Map([[location.id, { devices: [{ id: device.id }], streams: [] }]]) },
+    state: { locations: new Map([[location.id, { devices: [{ id: device.id }], streams: [], noise_status: 'unknown' }]]) },
     onLive(handler) { listeners.add(handler); return () => listeners.delete(handler); },
     async api(path) {
       requests.push(path);
@@ -101,6 +102,8 @@ function fixture() {
       if (url.pathname === '/locations/selected') return { ...location };
       if (url.pathname === '/locations/selected/threshold') return { current: { threshold_type: 'spl_z_leq', threshold_value: 60, interval_seconds: 1, revision: 1 } };
       if (url.pathname === '/devices/device-1') return { ...device };
+      if (url.pathname === '/devices') return { items: [{ ...device }], total: 1 };
+      if (url.pathname === '/recordings') return { items: [], total: 0 };
       if (url.pathname.endsWith('/threshold/versions')) return { items: [], total: 0 };
       if (url.pathname === '/measurements') {
         const offset = Number(url.searchParams.get('offset'));
@@ -123,9 +126,10 @@ test('actual location view refreshes only its latest page and relevant panels', 
   assert.equal(root.all().some(node => node.className === 'error-box'), false);
   const count = path => requests.filter(item => item.split('?')[0] === path).length;
   assert.equal(count('/measurements'), 1);
-  const initial = requests.length;
+  const nonContactRequests = () => requests.filter(path => !path.startsWith('/devices?')).length;
+  const initial = nonContactRequests();
   emit(reading('elsewhere')); t.mock.timers.tick(1100); await settle();
-  assert.equal(requests.length, initial);
+  assert.equal(nonContactRequests(), initial);
   for (let i = 0; i < 100; i++) emit(reading('selected'));
   t.mock.timers.tick(1100); await settle();
   assert.equal(count('/measurements'), 2);
@@ -136,9 +140,9 @@ test('actual location view refreshes only its latest page and relevant panels', 
   const older = root.all().find(node => node.tag === 'button' && /^Load .*older readings/.test(node.textContent));
   await older.click();
   assert.equal(count('/measurements'), 4); // Explicitly requested two saved pages.
-  const beforeLive = requests.length;
+  const beforeLive = nonContactRequests();
   emit(reading('selected')); t.mock.timers.tick(1100); await settle();
-  assert.equal(requests.length, beforeLive);
+  assert.equal(nonContactRequests(), beforeLive);
   assert.match(root.textContent, /New readings are available/);
   const refresh = root.all().find(node => node.tag === 'button' && node.textContent === 'New readings · Refresh latest');
   await refresh.click(); await settle();
@@ -184,11 +188,83 @@ test('actual view coalesces reading bursts while a history response is slow', as
   assert.equal(count(), 3);
 });
 
+test('location device contact updates separately from missing calibration without resetting history controls', async t => {
+  useDOM(t);
+  const { ctx, requests } = fixture();
+  let now = Date.parse('2026-10-10T00:00:00Z'), contact = new Date(now).toISOString();
+  ctx.serverNow = () => now;
+  const api = ctx.api;
+  ctx.api = async (path, options) => {
+    if (path.startsWith('/devices?')) { requests.push(path); return { items: [{ ...ctx.devices[0], last_contact_at: contact }], total: 1 }; }
+    return api(path, options);
+  };
+  const root = new Element('main');
+  const cleanup = await mountView(root, { page: 'location', id: 'selected' }, ctx);
+  t.after(cleanup); await settle();
+  const panel = root.all().find(node => node.className === 'view-device-row');
+  assert.match(panel.textContent, /Connection Connected/);
+  assert.match(panel.textContent, /Readings Calibration required/);
+  assert.doesNotMatch(panel.textContent, /Last usable reading received: Not received/);
+  assert.match(root.textContent, /Noise condition Not evaluated/);
+  const chart = root.querySelector('div.chart-area');
+  const measurement = root.all().find(node => node.tag === 'select' && node.attributes['aria-label'] === 'Measurement type');
+  measurement.value = 'dbfs_rms';
+  const historyRequests = () => requests.filter(path => path.startsWith('/measurements?')).length;
+  const previousHistory = historyRequests();
+  now += 2000; contact = new Date(now).toISOString();
+  t.mock.timers.tick(2000); await settle();
+  const updated = root.all().find(node => node.className === 'view-device-row');
+  assert.equal(updated.all().find(node => node.title === contact)?.title, contact);
+  assert.match(updated.textContent, /Connection Connected/);
+  assert.match(updated.textContent, /Readings Calibration required/);
+  assert.equal(root.querySelector('div.chart-area'), chart);
+  assert.equal(measurement.value, 'dbfs_rms');
+  assert.equal(historyRequests(), previousHistory);
+  cleanup();
+  const stoppedRequests = requests.length, stoppedText = root.textContent;
+  now += 60000; t.mock.timers.tick(60000); await settle();
+  assert.equal(requests.length, stoppedRequests);
+  assert.equal(root.textContent, stoppedText);
+});
+
+test('location contact ages out independently and leaving the route aborts a pending contact poll', async t => {
+  useDOM(t);
+  const { ctx, requests } = fixture();
+  let now = Date.parse('2026-10-10T00:00:00Z'), polls = 0, release, pendingSignal;
+  const contact = new Date(now).toISOString();
+  ctx.serverNow = () => now;
+  const api = ctx.api;
+  ctx.api = async (path, options) => {
+    if (path.startsWith('/devices?')) {
+      requests.push(path); polls++;
+      if (polls === 2) { pendingSignal = options.signal; await new Promise(resolve => { release = resolve; }); }
+      return { items: [{ ...ctx.devices[0], last_contact_at: polls === 1 ? contact : new Date(now).toISOString() }], total: 1 };
+    }
+    return api(path, options);
+  };
+  const root = new Element('main');
+  const cleanup = await mountView(root, { page: 'location', id: 'selected' }, ctx);
+  t.after(cleanup); await settle();
+  assert.match(root.textContent, /Connection Connected/);
+  now += 31000; t.mock.timers.tick(1000); await settle();
+  assert.match(root.textContent, /Connection No recent contact/);
+  assert.match(root.textContent, /Readings Calibration required/);
+  t.mock.timers.tick(1000); await settle();
+  assert.equal(polls, 2);
+  cleanup();
+  assert.equal(pendingSignal.aborted, true);
+  const saved = root.textContent;
+  release(); await settle(); t.mock.timers.tick(10000); await settle();
+  assert.equal(root.textContent, saved);
+  assert.equal(polls, 2);
+});
+
 test('incident details show device code and UUID and ignore unrelated live readings', async t => {
   useDOM(t);
   const { ctx, requests, emit } = fixture();
   ctx.api = async path => {
     requests.push(path);
+    if (path.endsWith('/analysis')) return { status: 'completed', provisional: false, audio: { available: false }, classification: { status: 'completed', primary_category: 'other', confidence_status: 'no_usable_audio' } };
     if (path.startsWith('/incidents/incident-1/measurements')) return { items: [], total: 0 };
     assert.equal(path, '/incidents/incident-1');
     return { id: 'incident-1', location_id: 'selected', device_id: 'device-1', device_external_id: 'UE-001', location_snapshot: { name: 'Test location', timezone: 'UTC' }, status: 'active', peak_db: 75, latest_db: 72, threshold_value: 60, threshold_type: 'spl_z_leq', breach_count: 2, started_at: '2026-10-09T12:00:00Z' };
@@ -198,12 +274,72 @@ test('incident details show device code and UUID and ignore unrelated live readi
   t.after(cleanup);
   assert.match(root.textContent, /Device code UE-001/);
   assert.match(root.textContent, /Internal device ID device-1/);
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 3);
   emit(reading('selected'));
   emit({ event_type: 'incident.updated', location_id: 'selected', incident_id: 'incident-other' });
   t.mock.timers.tick(1100); await settle();
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 3);
   emit({ event_type: 'incident.updated', location_id: 'selected', incident_id: 'incident-1' });
   t.mock.timers.tick(1100); await settle();
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 5);
+});
+
+test('location recordings remain playable when no sound measurements are eligible', async t => {
+  useDOM(t);
+  const { ctx } = fixture(), files = [], api = ctx.api;
+  ctx.api = async (path, options) => path.startsWith('/recordings/saved-audio/file?') ? (files.push(path), new Blob(['wav'])) : path.startsWith('/recordings?') ? { total: 1, items: [{ id: 'saved-audio', device_id: 'device-1', captured_at: '2026-10-10T01:02:03Z', duration_seconds: 10, target_duration_seconds: 10, kind: 'recording_group', file_available: true, revision: 'revision-1', calibration_present: false, location_snapshot: { name: 'Test location' }, status: 'ready' }] } : api(path, options);
+  ctx.audioFile = async id => { files.push(id); return new Blob(['wav'], { type: 'audio/wav' }); };
+  const root = new Element('main');
+  const cleanup = await mountView(root, { page: 'location', id: 'selected' }, ctx);
+  t.after(cleanup);
+  assert.match(root.textContent, /No eligible readings in this range/);
+  assert.match(root.textContent, /Uncalibrated audio/);
+  assert.equal(files.length, 0);
+  const listen = root.all().find(node => node.tag === 'button' && node.textContent === 'Listen' && !node.disabled);
+  await listen.click();
+  assert.deepEqual(files, ['/recordings/saved-audio/file?revision=revision-1']);
+  assert.equal(root.all().find(node => node.tag === 'audio').hidden, false);
+  cleanup();
+  assert.equal(root.all().find(node => node.tag === 'audio').src, '');
+});
+
+test('related readings open whole incident audio without exposing one-second clip players', async t => {
+  useDOM(t);
+  const { ctx, emit } = fixture(), files = [], rawFiles = [];
+  const classification = { status: 'completed', primary_category: 'traffic', confidence_status: 'classified' };
+  ctx.api = async (path, options) => {
+    if (options?.responseType === 'blob') { files.push(path); return new Blob(['whole incident wav']); }
+    if (path.endsWith('/analysis')) return { status: 'completed', provisional: false, revision: 'incident-revision', audio: { available: true, revision: 'incident-revision', duration_seconds: 18, window_duration_seconds: 18, coverage_percent: 100, context_before_seconds: 5, context_after_seconds: 5, recording_count: 18 }, classification: { status: 'completed', primary_category: 'voice', confidence_status: 'classified' } };
+    if (path.endsWith('/measurements?limit=25&offset=0')) return { items: [{ id: 'measurement', audio_chunk_id: 'one-second-source', device_id: 'device-1', measured_at: '2026-10-10T01:02:03Z', captured_at: '2026-10-10T01:02:03Z', duration_seconds: 1, interval_seconds: 1, measurement_type: 'dbfs_rms', value_db: -20, quality_status: 'good', calibration_snapshot: null, classification }], total: 1 };
+    assert.equal(path, '/incidents/incident-1');
+    return { id: 'incident-1', location_id: 'selected', device_id: 'device-1', status: 'active', threshold_type: 'dbfs_rms', peak_db: -20, latest_db: -20, started_at: '2026-10-10T01:02:03Z', location_snapshot: { name: 'Test location', timezone: 'Asia/Kolkata' } };
+  };
+  ctx.audioFile = async id => { rawFiles.push(id); return new Blob(['raw wav']); };
+  const root = new Element('main');
+  const cleanup = await mountView(root, { page: 'incident', id: 'incident-1' }, ctx);
+  t.after(cleanup);
+  await settle();
+  const controls = () => root.all().filter(node => node.tag === 'button' && node.textContent === 'Listen to whole incident');
+  assert.equal(controls().length, 1);
+  assert.equal(root.all().some(node => node.tag === 'button' && node.textContent === 'Listen'), false);
+  assert.equal(root.all().some(node => node.tag === 'th' && node.textContent === 'Recording'), false);
+  assert.equal(root.all().some(node => node.tag === 'audio' && node.attributes['aria-label'] === 'Saved recording playback'), false);
+  assert.doesNotMatch(root.textContent, /Traffic · model estimate/);
+  assert.match(root.textContent, /1s interval/); // Threshold evaluation still uses one-second measurements.
+  assert.equal(files.length, 0);
+  await controls()[0].click();
+  const audio = root.all().find(node => node.tag === 'audio' && node.attributes['aria-label'] === 'Incident audio playback'), source = audio.src;
+  assert.deepEqual(files, ['/incidents/incident-1/audio/file?revision=incident-revision']);
+  assert.deepEqual(rawFiles, []);
+  assert.match(source, /^blob:/);
+  assert.match(root.textContent, /Voice · model estimate/);
+  await controls()[0].click();
+  assert.equal(audio.src, source); assert.equal(files.length, 1);
+  emit({ event_type: 'incident.updated', location_id: 'selected', incident_id: 'incident-1' });
+  t.mock.timers.tick(1100); await settle();
+  assert.equal(root.all().find(node => node.tag === 'audio' && node.attributes['aria-label'] === 'Incident audio playback'), audio);
+  assert.equal(audio.src, source); assert.equal(files.length, 1);
+  await root.all().find(node => node.tag === 'button' && node.textContent === 'Refresh readings').click();
+  assert.equal(audio.src, source); assert.equal(files.length, 1); assert.deepEqual(rawFiles, []);
+  cleanup(); assert.equal(audio.src, '');
 });

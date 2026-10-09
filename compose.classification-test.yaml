@@ -1,0 +1,9 @@
+# Optional complete ML verification, layered by CLASSIFICATION_TESTS=1.
+services:
+  tests:
+    image: noise-monitor-classifier:local
+    build:
+      context: .
+      target: classifier
+    environment:
+      CLASSIFICATION_MODEL_PATH: /opt/urbanecho-models/yamnet.tflite

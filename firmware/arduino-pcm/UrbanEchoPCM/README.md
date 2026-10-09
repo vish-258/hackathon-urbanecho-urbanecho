@@ -2,7 +2,7 @@
 
 This is the updated **C++ Arduino sketch** for the assembled classic ESP32 / ESP-WROOM-32 and INMP441 microphone. Open `UrbanEchoPCM.ino` in Arduino IDE. It adapts the supplied prototype to the UrbanEcho server's authenticated PCM compatibility endpoints, retaining its microphone pins, signed 16-bit audio, DC blocker and configurable gain. The existing [ESP-IDF firmware](../../esp32/README.md) remains a separate alternative; do not combine the two projects.
 
-The user reports that their assembled hardware transmits to their small Python test server. That report establishes a useful starting point. This updated sketch still needs to be flashed and checked on that physical board; compilation does not establish microphone timing, sound accuracy or successful transmission to UrbanEcho.
+The user reports that their assembled hardware transmits to their small Python test server. That report establishes a useful starting point. The local bench follow-up below verifies firmware flashing, physical microphone uploads, live readings, a saved incident and recovery, and a saved daily summary on one board. These checks establish the software path; they do not establish acoustic accuracy.
 
 ## What to change on the device
 
@@ -11,23 +11,34 @@ Copy `config.example.h` to **`privateconfig.h` in this same folder**. Fill in th
 | Setting | Value to use |
 |---|---|
 | `UE_CONFIGURED` | `true` after completing the settings below |
-| `UE_WIFI_SSID`, `UE_WIFI_PASSWORD` | The device's reachable 2.4 GHz Wi-Fi network; keep these private |
+| `UE_USE_SAVED_WIFI` | Default: `false`. Set the macro to `true` to reuse this board's remembered Wi-Fi configuration |
+| `UE_WIFI_SSID`, `UE_WIFI_PASSWORD` | The device's reachable 2.4 GHz Wi-Fi network; keep these private. Ignored when `UE_USE_SAVED_WIFI` is `true` |
 | `UE_HOST` | The **UrbanEcho server computer's reachable LAN IP or hostname**, without `http://`, `https://`, port or path; never `localhost` |
 | `UE_USE_HTTPS`, `UE_PORT` | Default: `true`, `8443`, matching the optional local hardware listener |
 | `UE_CA_CERT` | That listener's **public CA certificate**; its certificate must match `UE_HOST` |
-| `UE_DEVICE_ID` | Leave empty (default) so the board identifies itself as `ESP-<chip MAC>` and one firmware fits every board; or set a registered code such as `UE-001` to pin one board |
-| `UE_DEVICE_TOKEN` | Leave empty (default) to use the token stored on the board by `scripts/provision-board.py`; or set the credential issued to the pinned `UE_DEVICE_ID` |
-| `UE_CAPTURE_INTERVAL_MS` | `1000` for continuous one-second recordings; larger intervals intentionally leave gaps |
+| Device identity | Automatic: `ESP-` followed by the factory MAC's 12 uppercase hexadecimal digits, without colons. There is no ID setting to fill in |
+| `UE_DEVICE_TOKEN` | Leave empty (default) to use the token stored on the board by `scripts/provision-board.py`. A private compiled token must belong to this board's MAC-based registration |
+| `UE_CAPTURE_INTERVAL_MS` | Default `1000`: continuous one-second recordings, assembled into incident audio on the server. Larger values intentionally leave gaps |
 | `UE_UPLOAD_INTERVAL_MS` | `0` sends each available recording promptly; a positive value imposes a minimum pause between uploads and can fill the queue |
 | `UE_GAIN` | `16.0f` preserves the prototype gain; reduce if the PCM output clips; changing gain changes the measurement chain |
 
+Complete incident audio requires continuous capture: set **`UE_CAPTURE_INTERVAL_MS=1000`** and `UE_UPLOAD_INTERVAL_MS=0`. Keep the location's measurement interval at **1 second**. Each short upload carries real audio, and the server joins the original samples into a single incident recording; keeping uploads short preserves prompt threshold detection and bounded ESP32 RAM. Changing the example file does not change an existing `privateconfig.h` or firmware already on a board. Preserve gain, pins, Wi-Fi, TLS and credentials, then compile and upload without erasing NVS. USB is needed; this firmware has no remote interval-setting or OTA command.
+
+The application now offers ten-second recordings assembled on the server from ten continuous uploads. Keep `UE_CAPTURE_INTERVAL_MS=1000` and `UE_UPLOAD_INTERVAL_MS=0`; the board cannot buffer a complete 320,000-byte ten-second payload safely alongside Wi-Fi/TLS. Short uploads preserve quick threshold checks and immutable retries. The ten-second server grouping does not change microphone gain, sound-level definitions, device identity or location mapping.
+
+The optional `10000` setting covers about **10% of elapsed time**: one second recorded and nine seconds intentionally unrecorded. It cannot provide complete incident audio. Missing time is not silence and remains visible in incident and daily coverage. The two boards keep independent sample clocks; matching intervals do not synchronize their capture start times. Continuous capture remains best effort during network outages because this board has only two RAM buffers and no persistent audio spool.
+
+If the board already connects to the intended network, add `#define UE_USE_SAVED_WIFI true` to its private configuration (or change the existing definition). The sketch calls `WiFi.begin()` with no arguments so the SDK can reuse its stored settings; it does not extract, print, or replace the saved SSID/password. Leave the Wi-Fi string declarations present; they may be empty in this mode. Complete the host and certificate settings, keep `UE_CONFIGURED=true`, and provision the device token over USB. Existing private configurations without the Wi-Fi macro retain their previous Wi-Fi behavior.
+
+Preserve the board's NVS partition: keep **Erase All Flash Before Sketch Upload disabled** (`EraseFlash=none`) and retain a compatible partition layout. Do not erase its Wi-Fi settings. If the saved network is missing or unreachable, the device remains disconnected; it does not fall back to placeholder credentials. Supply working private Wi-Fi settings with this option disabled if needed. A damaged or incompatible NVS partition can still be reformatted by the board runtime, so confirm reconnection on the physical device after flashing. Serial output identifies the selected Wi-Fi mode, prints the device's local IP once per connection, and reports disconnection transitions; it never prints the network name or password.
+
 For an explicitly isolated HTTP bench setup, use `UE_USE_HTTPS=false`, the reachable HTTP listener port, and `UE_ALLOW_HTTP_BENCH=true`. This opt-in sends the credential/audio without transport encryption. It does not expose a server automatically: a service bound only to `127.0.0.1:8000` cannot be reached by the ESP32. The default remains verified HTTPS; there is no certificate-bypass option.
 
-Do not paste secrets into chat, include `privateconfig.h` in a shared ZIP, or share a binary compiled from real settings. Wi-Fi details and the device credential are embedded in that provisioned binary. The public source package contains placeholders only.
+Do not paste secrets into chat, include `privateconfig.h` in a shared ZIP, or share a binary compiled from real settings. Wi-Fi details and any nonempty compiled device credential are embedded in that binary; USB-provisioned credentials are stored separately in the board's NVS flash. A full-flash backup also contains private settings. The public source package contains placeholders only.
 
 ## One firmware for every board
 
-With `UE_DEVICE_ID` and `UE_DEVICE_TOKEN` left empty, the same build can be flashed onto any board. Each board names itself `ESP-<chip MAC>` (for example `ESP-20500D114084`) and keeps its own token in NVS flash. A MAC address is not secret, so the per-board token is still required. Provision each new board once, from the project root, with the board on USB and no serial monitor open:
+With `UE_DEVICE_TOKEN` left empty, the same build can be flashed onto every supported board using the same Wi-Fi/server settings. Each board reads its factory MAC and names itself `ESP-<12 uppercase hex digits>` (for example `ESP-20500D114084`); no manual ID is needed. The identity stays the same after a restart or firmware update. Each board keeps its own token in NVS flash. A MAC address is not secret, so the per-board token is still required. Provision each new board once, from the project root, with the board on USB and no serial monitor open:
 
 ```sh
 python3 scripts/provision-board.py --location "Location name from Management"
@@ -39,9 +50,11 @@ Serial commands handled by the board itself, never forwarded to the server: `IDE
 
 ## Device ID determines location on the server
 
-Keep `UE_DEVICE_ID="UE-001"` for that physical device and create its server-side mapping to the correct registered location. Use another unique ID for each other physical device. The supported external-ID characters are letters, digits, `_` and `-`, up to 32 characters. The server also accepts an existing registered UUID.
+Use the identity reported by the `IDENTITY` serial command when assigning a physical board to a location. `scripts/provision-board.py` performs this registration using the board's identity automatically. Every board has its own MAC-based external ID; the database also retains a separate internal UUID for its records.
 
-The sketch sends no coordinates or location name. UrbanEcho resolves the mapped ID, checks the matching device credential and uses its persisted location assignment at capture time. A short ID alone is not a password. Changing the board's ID without updating its server registration/token will fail authentication; moving a device to another location should update its server assignment rather than rewriting old recording history.
+The sketch sends no coordinates or location name. UrbanEcho resolves the mapped ID, checks the matching device credential and uses its persisted location assignment at capture time. The ID alone is not a password. Moving a device to another location should update its server assignment rather than rewriting old recording history.
+
+When upgrading an older board that used a manually configured ID, first arrange its matching MAC-based server registration and credential. An old `UE_DEVICE_ID` declaration is ignored by this firmware and may be removed from the private header. A token issued only for the old registration will not authenticate the new identity. Do not erase historical records as part of an ordinary firmware update; decide the migration of the existing device record explicitly. New boards should use the USB/NVS provisioning flow above.
 
 ## Endpoint changes from the prototype
 
@@ -85,7 +98,7 @@ Use Arduino IDE 2 with **esp32 by Espressif Systems version 3.3.8**. Its built-i
 2. Create/fill the private settings file above.
 3. Select the board and USB serial port on the computer physically connected to the ESP32.
 4. Verify/compile, then upload. Use a USB data cable. Follow the actual board's BOOT/reset instructions if automatic flashing fails.
-5. Open Serial Monitor at **115200 baud**. The sketch waits for Wi-Fi and a recent SNTP time synchronization before capturing. A missing private configuration halts with “Not provisioned”.
+5. With Serial Monitor closed, run the provisioning command above. Then open Serial Monitor at **115200 baud**. The sketch waits for Wi-Fi and a recent SNTP time synchronization before capturing. Missing shared settings halt with “Not configured”; a missing device token reports “UNPROVISIONED” and waits for USB provisioning.
 
 Equivalent compiler command with Arduino CLI and this pinned core installed:
 
@@ -98,21 +111,23 @@ Do not upload a compile-check profile or assume a successful compiler run detect
 ## Timing, retry and buffering behavior
 
 - A random 128-bit boot session and monotonically increasing recording sequence provide retry identity. Capture, pending and in-flight recordings share **two fixed buffers occupying 64,000 audio bytes total**. There is no allocation of a new audio buffer per recording. Both buffers being occupied means the next scheduled recording is dropped; this small classic-ESP32 RAM budget cannot hold a long outage.
+- Each queued recording snapshots its capture interval and sends it as `X-Capture-Interval-Ms`. Retries reuse that value, timestamp, session, sequence and audio. The sequence increments once per scheduled recording, including a dropped capture, rather than once per microphone frame. The backend can distinguish planned sampling gaps from missing expected recordings.
 - SNTP synchronizes every 15 minutes. A clock becomes unusable after one hour without a successful update. The firmware requires a recent successful update, not merely a plausible date. The network must allow DNS and NTP, including after a reboot.
 - Capture timestamps are estimated from the first DMA completion time and advanced by the sample count, rather than assigned when a queued upload finally reaches the network. The first 400 ms after starting/restarting I2S is discarded. DMA overflow, a read timeout, excessive capture delay, or a clock adjustment over 250 ms discards an incomplete recording and restarts the stream; those gaps are not replaced by zeros. This is software timing logic, not a measured statement of the board's timestamp accuracy; validate it on the real hardware.
 - Capture keeps draining microphone data while network uploads retry. When all buffers are occupied, new recordings are dropped and their sequence numbers consumed. The serial counters distinguish dropped captures, dropped uploads and dropped status messages. Data in RAM is lost on reboot/power loss; there is no SD-card or flash spool.
 - Temporary network errors, HTTP 408/429 and server failures are retried with bounded backoff (six attempts by default). Every retry resends the immutable original request. After exhaustion, the recording is dropped and its counter increments. A permanent HTTP 4xx error pauses recording/upload until the configuration is fixed and the board restarted.
+- Audio and diagnostic requests share one persistent, serialized HTTPS connection, avoiding a handshake for every second of audio and avoiding two simultaneous TLS allocations. Reuse occurs only after a complete, bounded acknowledgement is consumed; malformed replies, failed uploads and disconnections close the socket before retry. Certificate verification and immutable upload IDs remain enforced.
 - Diagnostics use `/text` on a best-effort basis at most once per ten seconds, and only when no audio is already waiting in the upload queue. Their connect/response timeouts are 500 ms each and their TLS handshake budget is one second. They are also printed locally. A failed diagnostic request is not retained indefinitely. Serial counters are the reliable source for this firmware's drop totals; `/text` does not create a durable telemetry history. Network delays can still consume buffer capacity; this is not a lossless recorder.
-- The one-second default is intended to provide contiguous input for the configured recovery rule. Longer capture/upload intervals and actual dropped packets reduce coverage and can prevent a contiguous recovery window from completing. Keep gaps visible when reviewing daily summaries.
+- During each sampling gap the firmware drains and discards DMA samples while advancing its frame-based clock; it never uploads a backlog of microphone samples as a fresh recording. Ten-second cadence still produces one-second recordings. Recovery must use the declared capture cadence to judge consecutive scheduled readings; it does not establish that the unrecorded nine-second gaps were quiet. Missing or invalid scheduled readings can interrupt recovery. Keep these gaps visible in daily summaries.
 
 ## Physical acceptance check
 
-Run the server's normal API and worker, configure its reachable device listener, register/map `UE-001` to the intended **physical** location, and provision that device's token before flashing.
+Run the server's normal API and worker and configure its reachable device listener. Flash the shared firmware, then run `scripts/provision-board.py --location "Physical location name"` to register the board's MAC identity and provision its token. Keep the location separate from simulated demonstration locations.
 
 1. Confirm the serial monitor obtains Wi-Fi/time and reports `MIC OK` with nonzero changing samples. Inspect “MIC SILENT” or clipping before trying to infer noise levels.
 2. Confirm a `saved_audio_id` appears, then inspect that recording and its calculated level at the correct location. Compare capture time with the actual UTC/local time. Playback/intact bytes and plausible changing dBFS establish transmission/processing, not acoustic calibration.
 3. Confirm the app shows **physical, uncalibrated dBFS** until a genuine calibration is registered. Test a physical location rule that uses this same measurement definition and one-second duration. A simulated SPL rule is incompatible with uncalibrated physical input.
-4. Exercise normal, above-threshold and sustained levels; confirm the saved incident and app notification. Restore normal input for the complete configured recovery period; confirm resolution. Do not use dangerous sound levels just to exceed a threshold—choose a suitable controlled bench threshold.
+4. Exercise normal, above-threshold and sustained levels; confirm the saved incident in the application. Restore normal input for the complete configured recovery period; confirm resolution. Do not use dangerous sound levels just to exceed a threshold—choose a suitable controlled bench threshold.
 5. Briefly interrupt Wi-Fi, observe bounded retries/drop counters, restore it and inspect any resulting coverage gaps. Repeated submission of the same sequence must not add another recording or another incident.
 6. Generate/recalculate the location's report for the capture date and compare the saved recording count/duration and coverage with the app.
 
@@ -122,7 +137,10 @@ The input is **uncalibrated physical PCM16**, not simulated SPL. The DC blocker,
 
 | Observation | Check |
 |---|---|
-| “Not provisioned” | Private configuration exists beside the sketch; `UE_CONFIGURED=true`; valid ID/token/host; valid CA or explicit bench opt-in |
+| “Not configured” | Private configuration exists beside the sketch; `UE_CONFIGURED=true`; valid Wi-Fi/host; valid CA or explicit bench opt-in |
+| “UNPROVISIONED” | Close Serial Monitor and run `scripts/provision-board.py` for the intended physical location; the board needs its own stored token |
+| “IDENTITY ERROR” | The board could not read its factory MAC; no recordings start. Check the board/core and reset before attempting provisioning |
+| “Invalid UE_DEVICE_TOKEN” | Leave the token empty for USB provisioning, or supply the complete matching private token; malformed or oversized values are rejected before network capture |
 | Waiting for Wi-Fi/time | 2.4 GHz credentials, Wi-Fi isolation, DNS/NTP reachability; no recordings are fabricated while time is unknown |
 | Network error/negative HTTP code | Host/port, same reachable LAN, listener binding, firewall, certificate trust/SAN/clock; `/ping` tests only reachability |
 | HTTP 401/403 | Registered hardware ID and its own credential, device enabled state; do not use the browser/admin credential |
@@ -154,3 +172,24 @@ The final sketch compiled successfully with **Arduino CLI 1.5.1**, official **Ar
 The configured builds link the full capture/network runtime; the smaller unconfigured build alone would not establish memory fit. The compiler reports 213,216 bytes remaining after static globals for the configured profiles, **before** task stacks, Wi-Fi, TLS and other runtime allocations. Actual runtime headroom is still a hardware check. The final builds reported no sketch warnings; a clean upstream library compilation showed three `ESP_I2S` initializer warnings. An initial three-buffer prototype exceeded static RAM and was reduced to the two-buffer profile delivered here.
 
 No compiled dummy binary is a deployment artifact. Physical flashing, microphone capture, Wi-Fi recovery and acoustic calibration must be recorded separately after this updated program is exercised on the actual device. See the repository's hardware compatibility report for backend adapter checks.
+
+## Local bench follow-up — 9 October 2026
+
+One attached board was identified as an ESP32-D0WD-V3 revision 3.1 with 4 MB flash. A private full-flash backup was saved before installing the update. The original and new partition layouts matched; the upload preserved the NVS partition holding remembered Wi-Fi settings. Firmware upload completed with hash verification.
+
+Both configured profiles compiled with the pinned 3.3.8 core: remembered Wi-Fi (1,089,612 program bytes; 114,472 static-global bytes) and an older private configuration without the new flag (1,088,552 program bytes; 114,472 static-global bytes). Upstream ESP_I2S initializer warnings were unchanged. No provisioned binaries or backups are included in the repository.
+
+The board rejoined its remembered Wi-Fi without extracting the Wi-Fi password. After previous serial logs showed clipping at gain 16, the private uncalibrated bench profile used gain 1. One captured recording reported RMS 1,791, peak 16,173 and zero clipped output samples. This confirms a usable digital microphone signal, not sound-level calibration.
+
+The initial attempt could not reach this Mac because the board and Mac were on different networks. The board was then provisioned for the Mac's network using its saved Wi-Fi setting, copied directly into the ignored private configuration without printing the password. The final physical profile compiled (1,089,624 program bytes; 114,472 static-global bytes) and was flashed with hash verification.
+
+Verified after that correction:
+
+- The first 41 inspected physical recordings mapped to the registered bench location and were good-quality, eligible live, one-second mono PCM16 at 16 kHz. Capture-to-receipt delay was 1.57–2.47 seconds, including the recording itself. A later check found 126 processed measurements.
+- A downloaded 32,044-byte original matched its saved SHA-256 checksum. Credentials were not exposed during checks.
+- One physical digital-level breach reached -26.24 dBFS against the -30 dBFS bench rule. The saved incident resolved after three normal readings; durable opening, update and resolution events were present, and the incident appeared in the app.
+- The app displayed live readings for UE-001. Today's saved provisional report matched the application: 35 eligible recordings/35 usable seconds, average -34.18 dBFS, minimum -39.26, maximum -26.24, one incident and 0.0405% daily coverage. This is a snapshot; use Recalculate to include later recordings. One recording was still pending processing at that report's snapshot.
+
+Four one-second capture gaps occurred among the first 41 inspected recordings. Transmission is working but is not lossless; the report retains missing time as missing. A controlled Wi-Fi interruption/recovery test and acoustic calibration remain pending. The temporary bench location uses explicitly labelled placeholder coordinates (0, 0), not a verified geographic position. Keep the server Mac and Docker running on the configured network while using the device; a server IP change requires updating both the device host and its matching TLS certificate.
+
+For a read-only follow-up, use `scripts/check-device.py` with the ignored private hardware JSON, `--admin-env-file .env`, and `--verify-audio`. Select the bench location in the app; its negative dBFS values describe the digital signal and are not calibrated environmental dB SPL.

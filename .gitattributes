@@ -8,3 +8,6 @@
 Dockerfile text eol=lf
 # Preserve the bundled upstream files exactly, including their line endings.
 app/static/application/vendor/* -text -whitespace linguist-vendored
+# These model metadata files are verified against pinned SHA-256 digests.
+app/assets/yamnet/yamnet_class_map.csv -text -whitespace
+app/assets/yamnet/category_mapping.v1.json -text

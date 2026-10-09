@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from app import clock
 from app.config import get_settings
-from app.events import emit_event, lock_event_clock
+from app.events import emit_event, lock_event_clock, serialize_stream_reading
 from app.models import (AudioChunk, Device, DeviceAssignment, Evaluation, Incident,
                         Location, Measurement, StreamState, ThresholdVersion)
 
@@ -57,6 +57,10 @@ def _fingerprint(measurement: Measurement, chunk: AudioChunk) -> str:
               "received_at", "session_id", "sequence", "duration_seconds", "sample_rate", "checksum")
     data = {"measurement": {field: getattr(measurement, field) for field in fields},
             "source": {field: getattr(chunk, field) for field in source}}
+    # Do not change historical fingerprints for recordings created before this
+    # optional metadata existed. Explicit cadence remains part of retry identity.
+    if getattr(chunk, "capture_interval_ms", None) is not None:
+        data["source"]["capture_interval_ms"] = chunk.capture_interval_ms
     # Float columns round-trip Python integers as floats; normalize only those
     # fields, retaining full integer precision for sequences and identifiers.
     for field in ("interval_seconds", "value_db", "digital_dbfs"):
@@ -178,7 +182,8 @@ def _payload(measurement, chunk, rule, stream=None, incident=None, reason=None) 
                    measured_at=measurement.measured_at.isoformat(), threshold_value=rule.threshold_value if rule else None,
                    threshold_version_id=str(rule.id) if rule else None,
                    incident_status=incident.status if incident else None, transition_reason=reason,
-                   diagnostic=reason if stream is not None and stream.data_status == "invalid" else None,
+                   diagnostic=reason if stream is not None and stream.observed_measurement_id == measurement.id
+                   and stream.last_measurement_id != measurement.id else None,
                    noise_status=stream.noise_status if stream else "unknown",
                    data_status=stream.data_status if stream else "fresh")
     payload.update(stream_id=str(stream.id) if stream else None,
@@ -211,7 +216,13 @@ def _payload(measurement, chunk, rule, stream=None, incident=None, reason=None) 
 
 
 def _emit(session, event_type, measurement, chunk, rule, stream, incident=None, reason=None):
-    return emit_event(session, event_type, _payload(measurement, chunk, rule, stream, incident, reason),
+    payload = _payload(measurement, chunk, rule, stream, incident, reason)
+    if stream is not None:
+        eligible = session.get(Measurement, stream.last_measurement_id) if stream.last_measurement_id else None
+        # Top-level fields describe the observation for the event/history feed.
+        # Displayed stream values always describe the last eligible measurement.
+        payload["eligible_reading"] = serialize_stream_reading(stream, eligible)
+    return emit_event(session, event_type, payload,
                       incident_id=incident.id if incident else None, device_id=chunk.device_id,
                       location_id=incident.location_id if incident else chunk.location_id)
 
@@ -234,7 +245,8 @@ def _interrupt(session, measurement, chunk, settings, now, reason):
             continue
         stream.observed_at = chunk.captured_at
         stream.observed_measurement_id = measurement.id
-        stream.data_status = "invalid"
+        stream.data_status = ("invalid" if stream.watermark >= now - timedelta(seconds=settings.data_stale_seconds)
+                              else "stale")
         stream.updated_at = now
         stream.recovery_streak = 0
         incident = session.scalar(select(Incident).where(Incident.stream_id == stream.id,
@@ -366,16 +378,27 @@ def evaluate_measurement(session, measurement: Measurement, settings=None) -> Ev
     incident = session.scalar(select(Incident).where(Incident.stream_id == stream.id,
                                 Incident.status.in_(("active", "recovering"))))
     contiguous = bool(stream.watermark is not None and stream.window_end is not None
-                      and abs((chunk.captured_at - stream.window_end).total_seconds()) <= .001
+                      and stream.last_measurement_id is not None
                       and stream.last_session_id == chunk.session_id
                       and stream.last_sequence is not None and chunk.sequence == stream.last_sequence + 1
                       and stream.threshold_version_id == rule.id
                       and stream.observed_at == stream.watermark)
-    if contiguous and stream.last_measurement_id is not None:
+    if contiguous:
         previous = session.get(Measurement, stream.last_measurement_id)
-        previous_chunk = session.get(AudioChunk, previous.audio_chunk_id)
-        contiguous = (previous.calibration_version == measurement.calibration_version
-                      and previous.calibration_snapshot == measurement.calibration_snapshot)
+        previous_chunk = session.get(AudioChunk, previous.audio_chunk_id) if previous is not None else None
+        if previous_chunk is None:
+            contiguous = False
+        else:
+            previous_period = (previous_chunk.capture_interval_ms / 1000
+                               if previous_chunk.capture_interval_ms is not None else previous_chunk.duration_seconds)
+            period = chunk.capture_interval_ms / 1000 if chunk.capture_interval_ms is not None else chunk.duration_seconds
+            # Consecutive scheduled samples can recover; the unrecorded gap is
+            # never silence or duration/coverage. Missed samples, cadence changes
+            # and actual clock gaps still reset the recovery streak.
+            contiguous = (period == previous_period
+                          and abs((chunk.captured_at - stream.watermark).total_seconds() - previous_period) <= .001
+                          and previous.calibration_version == measurement.calibration_version
+                          and previous.calibration_snapshot == measurement.calibration_snapshot)
     stream.threshold_version_id = rule.id
     stream.watermark = chunk.captured_at
     stream.window_end = chunk.captured_at + timedelta(seconds=measurement.interval_seconds)

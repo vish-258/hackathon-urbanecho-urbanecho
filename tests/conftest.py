@@ -71,7 +71,7 @@ def isolated_database(request):
     environment = request.getfixturevalue('integration_environment')
     controlled = request.getfixturevalue('fake_clock')
     with environment['privileged'].begin() as connection:
-        connection.execute(text('TRUNCATE processing_jobs, measurements, incidents, audio_chunks, devices, locations CASCADE'))
+        connection.execute(text('TRUNCATE recording_group_scan_state, classification_scan_state, processing_jobs, measurements, incidents, audio_chunks, devices, locations CASCADE'))
         connection.execute(text('UPDATE event_clock SET last_position=0, epoch=:epoch, created_at=:now WHERE id=1'),
                            {'epoch': uuid.uuid4(), 'now': controlled.now()})
     for child in environment['root'].iterdir():

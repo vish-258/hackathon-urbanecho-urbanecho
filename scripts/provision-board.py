@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Register the USB-connected board under its chip ID and store its token on the board.
 
-Flash the shared Arduino firmware first (empty UE_DEVICE_ID and UE_DEVICE_TOKEN). The board
+Flash the shared Arduino firmware first (empty UE_DEVICE_TOKEN, automatic MAC identity). The board
 reports ESP-<chip MAC>; this tool registers that ID at a location, keeps a private backup,
 and sends the token over USB. The token is never printed.
 """
@@ -25,10 +25,11 @@ import termios
 import time
 from uuid import UUID
 
-from hardware_common import admin_token, api, base_url, locked_config, save_private
+from hardware_common import APIError, admin_token, api, base_url, is_simulated, locked_config, save_private
 
 IDENTITY = re.compile(r"^IDENTITY ([A-Za-z0-9_-]{1,36}) (provisioned|unprovisioned)$")
 TOKEN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+SAVED_AUDIO = re.compile(r"(?:^|\s)saved_audio_id=([0-9a-fA-F-]{36})(?:\s|$)")
 BACKUP_SCHEMA = "urbanecho-board-v1"
 PORT_PATTERNS = ("/dev/cu.usbserial*", "/dev/cu.SLAB_USBtoUART*", "/dev/cu.wchusbserial*",
                  "/dev/cu.usbmodem*", "/dev/ttyUSB*", "/dev/ttyACM*")
@@ -169,9 +170,18 @@ def read_backup(path: Path, device_id: str) -> dict | None:
     return value
 
 
-def provision(args, admin: str, port) -> dict:
+def physical_location(args, admin: str) -> dict:
+    if is_simulated(args.microphone_model):
+        raise RuntimeError("Use the actual physical microphone model, without demo or synthetic labels.")
+    location = resolve_location(base_url(args.url), admin, args.location, args.location_id)
+    if is_simulated(location.get("name", "")):
+        raise RuntimeError("Create or select a physical location in Management; do not use a simulated/demo location.")
+    return location
+
+
+def provision(args, admin: str, port, *, location: dict | None = None) -> dict:
     url = base_url(args.url)
-    location = resolve_location(url, admin, args.location, args.location_id)
+    location = physical_location(args, admin) if location is None else location
     if warning := rule_warning(url, admin, location):
         print(warning)
     device_id, provisioned = board_identity(port)
@@ -208,14 +218,58 @@ def provision(args, admin: str, port) -> dict:
         return {"device_id": device_id, "server_id": existing["id"], "changed": True}
 
 
-def wait_for_upload(url: str, admin: str, server_id: str, since: datetime, seconds: float) -> bool:
+def wait_for_upload(url: str, admin: str, server_id: str, since: datetime, seconds: float, port) -> dict | None:
+    """Confirm a USB upload acknowledgement against its saved server record.
+
+    Diagnostic /text messages also update last_contact_at, so contact alone is
+    not audio evidence. Keeping the serial link open lets us inspect accepted
+    recordings even before the worker has produced a measurement.
+    """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        contact = api(url, admin, f"/devices/{server_id}").get("last_contact_at")
-        if contact and datetime.fromisoformat(contact) > since:
-            return True
-        time.sleep(3)
-    return False
+        line = port.read_line(deadline)
+        if line is None:
+            return None
+        match = SAVED_AUDIO.search(line)
+        if not match:
+            continue
+        try:
+            audio_id = str(UUID(match.group(1)))
+        except ValueError:
+            continue
+        try:
+            recording = api(url, admin, f"/audio/{audio_id}")
+        except APIError as error:
+            if error.status == 404:
+                continue  # An ACK from another server cannot verify this setup.
+            raise
+        if recording.get("id") != audio_id or str(recording.get("device_id")) != server_id:
+            continue
+        try:
+            capture = datetime.fromisoformat(recording["captured_at"])
+            received = datetime.fromisoformat(recording["received_at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if capture.tzinfo is None or received.tzinfo is None or capture < since or received < since:
+            continue  # Old recordings/retries do not prove this capture session.
+        status = recording.get("status")
+        return {"audio_id": audio_id, "processing_status": status if status in {
+            "pending", "processing", "completed", "failed"} else "unconfirmed"}
+    return None
+
+
+def report_upload(device_id: str, recording: dict | None):
+    if recording is None:
+        print("No new saved recording confirmed. Open the serial monitor to check Wi-Fi, time sync and HTTP results.")
+        return
+    print(f"{device_id}: new audio recording saved ({recording['audio_id']}).")
+    status = recording["processing_status"]
+    if status == "completed":
+        print("Sound-level processing completed; check the application's reading quality and calibration status.")
+    elif status == "failed":
+        print("Audio arrived, but sound-level processing failed; inspect the recording in the server.")
+    else:
+        print(f"Sound-level processing: {status}; a saved upload does not confirm a completed or calibrated measurement.")
 
 
 def main():
@@ -232,17 +286,16 @@ def main():
     args = parser.parse_args()
     admin = admin_token(args.admin_env_file)
     started = datetime.now(timezone.utc)
+    location = physical_location(args, admin)
     port = SerialPort(args.port or find_port())
     try:
-        result = provision(args, admin, port)
+        result = provision(args, admin, port, location=location)
+        if result["changed"] and args.wait_seconds > 0:
+            print(f"Waiting up to {args.wait_seconds:.0f} s for a new saved recording (Wi-Fi, time sync, upload)...")
+            report_upload(result["device_id"], wait_for_upload(
+                base_url(args.url), admin, result["server_id"], started, args.wait_seconds, port))
     finally:
         port.close()
-    if result["changed"] and args.wait_seconds > 0:
-        print(f"Waiting up to {args.wait_seconds:.0f} s for its first upload (Wi-Fi, time sync, upload)...")
-        if wait_for_upload(base_url(args.url), admin, result["server_id"], started, args.wait_seconds):
-            print(f"{result['device_id']} is uploading.")
-        else:
-            print("No upload yet. Open the serial monitor to check Wi-Fi, time sync and HTTP results.")
 
 
 if __name__ == "__main__":

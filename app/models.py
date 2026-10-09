@@ -58,12 +58,14 @@ class AudioChunk(Base):
         CheckConstraint("status IN ('pending', 'processing', 'completed', 'failed')", name="ck_audio_status"),
         CheckConstraint("sequence >= 0", name="ck_audio_sequence"),
         CheckConstraint("duration_seconds > 0 AND duration_seconds <= 600", name="ck_audio_duration"),
+        CheckConstraint("capture_interval_ms IS NULL OR (capture_interval_ms BETWEEN 1 AND 3600000 AND capture_interval_ms >= duration_seconds * 1000)", name="ck_audio_capture_interval"),
         CheckConstraint("sample_rate > 0", name="ck_audio_sample_rate"),
         CheckConstraint("threshold_type IN ('dbfs_rms', 'spl_z_leq')", name="ck_audio_threshold_type"),
         CheckConstraint("interval_seconds BETWEEN 1 AND 60", name="ck_audio_interval"),
         CheckConstraint("threshold_value > '-Infinity'::float8 AND threshold_value < 'Infinity'::float8", name="ck_audio_threshold_finite"),
         Index("ix_audio_device_captured", "device_id", "captured_at"),
         Index("ix_audio_location_captured", "location_id", "captured_at"),
+        Index("ix_audio_received_scan", "received_at", "id"),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="RESTRICT"))
@@ -77,6 +79,7 @@ class AudioChunk(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     duration_seconds: Mapped[float] = mapped_column(Float)
+    capture_interval_ms: Mapped[int | None] = mapped_column(Integer)
     sample_rate: Mapped[int] = mapped_column(Integer)
     audio_format: Mapped[str] = mapped_column(String(40))
     checksum: Mapped[str] = mapped_column(String(64))
@@ -134,6 +137,7 @@ class Incident(Base):
         CheckConstraint("threshold_value > '-Infinity'::float8 AND threshold_value < 'Infinity'::float8", name="ck_incident_threshold_finite"),
         Index("ix_incidents_location_started", "location_id", "started_at"),
         Index("ix_incidents_device_started", "device_id", "started_at"),
+        Index("ix_incidents_analysis_discovery", "started_at", "id"),
         Index("uq_incident_unresolved_stream", "stream_id", unique=True, postgresql_where=text("status IN ('active', 'recovering')")),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -174,6 +178,138 @@ class ProcessingJob(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class RecordingClassification(Base):
+    """Independent durable classifier job and saved result for an original WAV."""
+    __tablename__ = "recording_classifications"
+    __table_args__ = (
+        UniqueConstraint("audio_chunk_id", "model_version", "mapping_version", name="uq_classification_version"),
+        CheckConstraint("status IN ('pending', 'processing', 'completed', 'failed')", name="ck_classification_status"),
+        CheckConstraint("attempts >= 0", name="ck_classification_attempts"),
+        CheckConstraint("(status = 'processing' AND lease_until IS NOT NULL AND lease_token IS NOT NULL) OR (status <> 'processing' AND lease_until IS NULL AND lease_token IS NULL)", name="ck_classification_lease"),
+        CheckConstraint("status <> 'completed' OR (result IS NOT NULL AND primary_category IS NOT NULL AND classified_at IS NOT NULL)", name="ck_classification_result"),
+        Index("ix_classification_claim", "model_version", "mapping_version", "status", "available_at", "source_received_at"),
+        Index("ix_classification_pending_order", "model_version", "mapping_version", "source_received_at", "created_at", "id", postgresql_where=text("status = 'pending'")),
+        Index("ix_classification_expired", "model_version", "mapping_version", "lease_until", postgresql_where=text("status = 'processing'")),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    audio_chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("audio_chunks.id", ondelete="RESTRICT"))
+    model_version: Mapped[str] = mapped_column(String(100))
+    mapping_version: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
+    source_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    primary_category: Mapped[str | None] = mapped_column(String(40))
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ClassificationScanState(Base):
+    """Bounded resumable history scan and non-sensitive model readiness."""
+    __tablename__ = "classification_scan_state"
+    model_version: Mapped[str] = mapped_column(String(100), primary_key=True)
+    mapping_version: Mapped[str] = mapped_column(String(100), primary_key=True)
+    after_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    after_audio_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scan_available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    worker_status: Mapped[str] = mapped_column(String(20), default="starting", server_default="starting")
+    worker_error: Mapped[str | None] = mapped_column(Text)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IncidentAnalysis(Base):
+    """A versioned, leased incident evidence snapshot; originals remain immutable."""
+    __tablename__ = "incident_analyses"
+    __table_args__ = (
+        UniqueConstraint("incident_id", "model_version", "mapping_version", name="uq_incident_analysis_version"),
+        CheckConstraint("status IN ('pending', 'processing', 'completed', 'failed')", name="ck_incident_analysis_status"),
+        CheckConstraint("attempts >= 0", name="ck_incident_analysis_attempts"),
+        CheckConstraint("(status = 'processing' AND lease_until IS NOT NULL AND lease_token IS NOT NULL) OR (status <> 'processing' AND lease_until IS NULL AND lease_token IS NULL)", name="ck_incident_analysis_lease"),
+        CheckConstraint("status <> 'completed' OR (manifest IS NOT NULL AND result IS NOT NULL AND revision IS NOT NULL AND generated_at IS NOT NULL)", name="ck_incident_analysis_result"),
+        Index("ix_incident_analysis_claim", "model_version", "mapping_version", "status", "available_at", "created_at"),
+        Index("ix_incident_analysis_scan", "model_version", "mapping_version", "next_scan_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id", ondelete="RESTRICT"))
+    model_version: Mapped[str] = mapped_column(String(100))
+    mapping_version: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    next_scan_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    revision: Mapped[str | None] = mapped_column(String(64))
+    manifest: Mapped[dict | None] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RecordingGroup(Base):
+    """Ten-second playback identity over immutable one-second source recordings."""
+    __tablename__ = "recording_groups"
+    __table_args__ = (
+        UniqueConstraint("device_id", "session_id", "assignment_id", "sequence_start", name="uq_recording_group_identity"),
+        CheckConstraint("sequence_start >= 0 AND sequence_start % 10 = 0", name="ck_recording_group_sequence"),
+        CheckConstraint("status IN ('collecting','ready','partial','no_audio','failed')", name="ck_recording_group_status"),
+        CheckConstraint("(lease_until IS NULL) = (lease_token IS NULL)", name="ck_recording_group_lease"),
+        CheckConstraint("status <> 'ready' OR (manifest IS NOT NULL AND revision IS NOT NULL)", name="ck_recording_group_ready"),
+        Index("ix_recording_groups_location_capture", "location_id", "captured_at", "id"),
+        Index("ix_recording_groups_device_capture", "device_id", "captured_at", "id"),
+        Index("ix_recording_groups_work", "dirty", "available_at", "lease_until"),
+        Index("ix_recording_groups_refresh", "next_check_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="RESTRICT"))
+    assignment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("device_assignments.id", ondelete="RESTRICT"))
+    location_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("locations.id", ondelete="RESTRICT"))
+    location_snapshot: Mapped[dict] = mapped_column(JSONB)
+    session_id: Mapped[str] = mapped_column(String(128))
+    sequence_start: Mapped[int] = mapped_column(BigInteger)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), default="collecting", server_default="collecting")
+    dirty: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    revision: Mapped[str | None] = mapped_column(String(64))
+    manifest: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RecordingGroupPart(Base):
+    __tablename__ = "recording_group_parts"
+    __table_args__ = (Index("ix_recording_group_parts_group", "group_id", "sequence"),)
+    audio_chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("audio_chunks.id", ondelete="RESTRICT"), primary_key=True)
+    group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("recording_groups.id", ondelete="RESTRICT"))
+    sequence: Mapped[int] = mapped_column(BigInteger)
+
+
+class RecordingGroupScanState(Base):
+    __tablename__ = "recording_group_scan_state"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_recording_group_scan_singleton"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    after_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    after_audio_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    history_available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ThresholdVersion(Base):

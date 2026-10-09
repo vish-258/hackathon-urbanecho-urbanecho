@@ -22,6 +22,7 @@ from app.processing import calculate_measurement
 from app.evaluation import persist_measurement, evaluate_measurement
 from app.events import lock_event_clock, sweep_freshness
 from app.reconcile import reconcile
+from app.recording_group_worker import group_worker_loop
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +160,9 @@ def main() -> None:
     daily_thread = threading.Thread(target=daily_worker_loop, args=(stop, settings),
                                     name="daily-reports", daemon=True)
     daily_thread.start()
+    group_thread = threading.Thread(target=group_worker_loop, args=(stop, settings),
+                                    name="recording-files", daemon=True)
+    group_thread.start()
     next_reconciliation = 0.0
     while not stop.is_set():
         try:
@@ -180,6 +184,7 @@ def main() -> None:
     # Graceful shutdown normally commits the in-flight report. If the container
     # stops first, the report's durable lease makes the next worker retry safely.
     daily_thread.join(timeout=10)
+    group_thread.join(timeout=10)
 
 
 if __name__ == "__main__":

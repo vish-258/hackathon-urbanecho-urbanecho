@@ -57,6 +57,46 @@ test('one unusable reading keeps a device reporting but flags attention; stalene
   assert.equal(deviceReporting(device,undefined).reporting,false);
 });
 
+test('an unusable latest sample with usable history still counts toward partial location reporting', () => {
+  const location=normal();
+  location.devices.push({id:'device-b',assignment_id:'assignment-b',enabled:true});
+  location.data_status='stale';
+  location.streams[0].data_status='invalid';
+  assert.equal(freshnessLabel(location),'Some devices not reporting');
+  assert.equal(condition(location).label,'Some devices not reporting');
+  location.streams[0].data_status='stale';
+  assert.equal(freshnessLabel(location),'No recent data');
+});
+
+test('clipped observations do not extend eligible freshness, replace units, or resolve an incident', () => {
+  const state=applySnapshot(initialState(),snapshot());
+  const device={id:'device-a',current_assignment_id:'assignment-a',enabled:true};
+  const good={measurement_value:75,measurement_type:'spl_z_leq',weighting:'Z',interval_seconds:1,
+    calibration_status:'calibrated',measured_at:'2026-10-09T12:00:00Z',received_at:'2026-10-09T12:00:01Z'};
+  applyEvent(state,event('incident.opened',{...good,eligible_reading:good}),`${epoch}:1`);
+  applyEvent(state,event('location.status_changed',{event_id:'event-b',data_status:'invalid',
+    measured_at:'2026-10-09T12:00:29Z',measurement_value:-1,measurement_type:'dbfs_rms',
+    weighting:'none',calibration_status:'not_required',diagnostic:'quality_clipped',
+    eligible_reading:good}),`${epoch}:2`);
+  const location=state.locations.get('location-a'), stream=location.streams[0];
+  for (const [key,value] of Object.entries(good)) assert.equal(stream[key],value,key);
+  assert.equal(stream.diagnostic,'quality_clipped');
+  ageData(state,Date.parse('2026-10-09T12:00:30Z'),30);
+  assert.deepEqual(deviceReporting(device,location),{reporting:true,attention:true});
+  ageData(state,Date.parse('2026-10-09T12:00:31Z'),30);
+  assert.deepEqual(deviceReporting(device,location),{reporting:false,attention:false});
+  assert.equal(freshnessLabel(location),'No recent data');
+  assert.equal(state.incidents.get('incident-a').status,'active');
+  const normalReading={...good,measurement_value:55,measured_at:'2026-10-09T12:00:32Z'};
+  applyEvent(state,event('incident.updated',{event_id:'event-c',incident_status:'recovering',
+    noise_status:'recovering',diagnostic:null,recovery_streak:1,eligible_reading:normalReading}),`${epoch}:3`);
+  assert.deepEqual(deviceReporting(device,location),{reporting:true,attention:false});
+  assert.equal(stream.measurement_value,55);
+  assert.equal(stream.measured_at,normalReading.measured_at);
+  assert.equal(stream.diagnostic,null);
+  assert.equal(state.incidents.get('incident-a').status,'recovering');
+});
+
 test('disabled devices and former assignments cannot make a stale location appear partly reporting', () => {
   const location=normal();
   location.data_status='stale';

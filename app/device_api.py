@@ -14,6 +14,7 @@ from app.pcm_api import router as pcm_router
 
 def create_device_app():
     application = create_app()
+    application.state.local_audio_playback = False
     allowed = {
         ("/health/live", "GET"),
         ("/audio", "POST"),

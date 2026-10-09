@@ -20,7 +20,7 @@ from app.auth import require_admin
 from app.config import get_settings
 from app.db import SessionLocal
 from app.events import (cursor_error, cursor_for, encode_sse, lock_event_clock,
-                        read_events, sweep_freshness, validate_cursor)
+                        read_events, serialize_stream_reading, sweep_freshness, validate_cursor)
 from app.models import Device, Incident, Location, Measurement, MeasurementEvaluation, StreamState
 
 router = APIRouter()
@@ -98,12 +98,7 @@ def snapshot(location_id=None, device_id=None, limit=50, offset=0, settings=None
                 streams.append({"id": state.id, "device_id": state.device_id, "assignment_id": state.assignment_id,
                                 "noise_status": state.noise_status, "data_status": "fresh" if fresh else
                                 "invalid" if state.watermark is not None and state.watermark >= cutoff and state.data_status == "invalid" else "stale",
-                                "measurement_value": state.last_value, "measured_at": state.watermark,
-                                "received_at": measurement.received_at if measurement else None,
-                                "measurement_type": measurement.measurement_type if measurement else None,
-                                "weighting": measurement.weighting if measurement else None,
-                                "interval_seconds": measurement.interval_seconds if measurement else None,
-                                "calibration_status": measurement.calibration_status if measurement else None,
+                                **serialize_stream_reading(state, measurement),
                                 "diagnostic": evaluation.diagnostic if evaluation else None,
                                 "threshold_version_id": state.threshold_version_id, "recovery_streak": state.recovery_streak})
             statuses = {item.status for item in unresolved}

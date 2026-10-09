@@ -90,8 +90,21 @@ export function applyEvent(state, event, cursor) {
       stream = {id: event.stream_id, device_id: event.device_id, assignment_id: event.assignment_id};
       location.streams.push(stream);
     }
-    for (const key of ['noise_status', 'data_status', 'measurement_value', 'measurement_type', 'weighting', 'interval_seconds', 'calibration_status', 'measured_at', 'received_at', 'threshold_version_id', 'recovery_streak', 'diagnostic']) {
+    const previousDataStatus = stream.data_status;
+    for (const key of ['noise_status', 'data_status', 'threshold_version_id', 'recovery_streak', 'diagnostic']) {
       if (event[key] !== undefined && event[key] !== null) stream[key] = event[key];
+    }
+    // New events separate the rejected observation from the eligible reading,
+    // matching snapshots. Legacy invalid events contain only the rejected sample:
+    // keep any known eligible reading, or fail closed until a snapshot arrives.
+    const canonicalReading = Object.hasOwn(event, 'eligible_reading');
+    const reading = canonicalReading ? event.eligible_reading : event.data_status === 'invalid' ? null : event;
+    for (const key of ['measurement_value', 'measurement_type', 'weighting', 'interval_seconds', 'calibration_status', 'measured_at', 'received_at']) {
+      if (reading && Object.hasOwn(reading, key)) stream[key] = reading[key];
+    }
+    if (event.data_status === 'invalid' && !canonicalReading) {
+      if (!stream.measured_at) stream.data_status = 'stale';
+      else if (previousDataStatus === 'stale') stream.data_status = 'stale';
     }
     if (Object.hasOwn(event, 'diagnostic')) stream.diagnostic = event.diagnostic;
     else if (event.transition_reason === 'measurement_evaluated') stream.diagnostic = null;
