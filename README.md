@@ -20,7 +20,7 @@ UrbanEcho is a working **local prototype for residential community management**:
 | Daily reports | Manual recalculation and scheduled previous-local-day processing, energy/duration averages, incident counts, coverage and clear partial/no-data states. |
 | Repeatable demonstration | Three labelled simulated locations exercise normal, equal, excessive, sustained, recovery, stale and retry scenarios through the actual software pipeline. |
 
-Latest recorded verification, **9 October 2026**: **454 backend tests and 34 application/demo JavaScript tests passed**; the adapted Arduino firmware compiled. All **330 existing original recordings** and saved summaries were preserved after the update and restart. See the [PCM integration verification report](docs/PCM-INTEGRATION-VERIFICATION.md) for the exact checks and physical-testing limitations. These are recorded results, not a claim that every documentation change reruns the suite.
+Latest recorded verification, **9 October 2026**: **454 backend tests and 34 application/demo JavaScript tests passed**; the adapted Arduino firmware compiled. All **330 existing original recordings** and saved summaries were preserved after the update and restart. See the [PCM integration verification report](docs/PCM-INTEGRATION-VERIFICATION.md) for the exact checks and physical-testing limitations. During repository preparation, a clean copy of the staged source also passed all 454 backend and 34 interface checks after generating its own private settings; its Docker configuration validated. These are dated results, not a claim that future changes have been verified.
 
 ## Business case
 
@@ -64,8 +64,8 @@ For an existing installation, follow [Start or update the stack](#start-or-updat
 | Team account | Confirmed project relationship |
 |---|---|
 | [@vish-258](https://github.com/vish-258) | Repository owner |
-| [@srinivasarajui](https://github.com/srinivasarajui) | Teammate; collaborator access requested |
-| [@Rohith-1-2](https://github.com/Rohith-1-2) | Teammate; collaborator access requested |
+| [@srinivasarajui](https://github.com/srinivasarajui) | Teammate; write-access invitation sent on 9 October 2026 |
+| [@Rohith-1-2](https://github.com/Rohith-1-2) | Teammate; write-access invitation sent on 9 October 2026 |
 
 Individual contribution descriptions have not yet been supplied. Add each person's actual contribution before submission; no engineering role or contribution is inferred from repository access. Teammates must accept their GitHub invitations before their write access becomes active.
 
