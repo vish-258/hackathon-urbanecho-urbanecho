@@ -4,12 +4,13 @@ import { createRecordingPlayer, createRecordingsBrowser } from '../app/static/ap
 import { classificationNode } from '../app/static/application/classification.mjs';
 
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.attributes = {}; this._text = ''; this.value = ''; this.pauses = 0; this.loads = 0; this.plays = 0; }
+  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.attributes = {}; this._text = ''; this.value = ''; this.pauses = 0; this.loads = 0; this.plays = 0; this.isConnected = true; }
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(child => child.textContent || '').join(' '); }
   append(...children) { this.children.push(...children); }
-  replaceChildren(...children) { this._text = ''; this.children = children; }
+  replaceChildren(...children) { for (const child of this.all()) { child.isConnected = false; if (document.activeElement === child) document.activeElement = null; } this._text = ''; this.children = children; }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return this.attributes[name]; }
   removeAttribute(name) { delete this.attributes[name]; if (name === 'src') this.src = ''; }
   addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); }
   async fire(name) { for (const handler of this.listeners[name] || []) await handler({}); }
@@ -18,6 +19,8 @@ class Element {
   pause() { this.pauses++; }
   load() { this.loads++; }
   play() { this.plays++; }
+  focus(options) { document.activeElement = this; this.focusOptions = options; }
+  scrollIntoView(options) { this.scrollOptions = options; }
 }
 
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -25,7 +28,8 @@ const recording = (id = 'audio-1') => ({ id, device_id: 'device-1', captured_at:
 
 function fixture(t) {
   const original = globalThis.document;
-  globalThis.document = { createElement: tag => new Element(tag) };
+  const elements = [];
+  globalThis.document = { activeElement: null, createElement(tag) { const node = new Element(tag); elements.push(node); return node; }, querySelectorAll: selector => elements.filter(node => node.isConnected && selector === '[data-recording-id]' && Object.hasOwn(node.attributes, 'data-recording-id')) };
   t.after(() => { globalThis.document = original; });
   const controller = new AbortController(), calls = [], created = [], revoked = [];
   const ctx = { signal: controller.signal, devices: [{ id: 'device-1', external_id: 'ESP-MAC1' }], serverNow: () => Date.parse('2026-10-10T01:02:30Z'),
@@ -55,6 +59,21 @@ test('Listen loads only the chosen authenticated file and exposes native control
   await f.player.element.all().find(item => item.tag === 'button').click();
   assert.deepEqual(f.revoked, ['blob:saved-1', 'blob:saved-2']);
   assert.equal(f.audio.src, ''); assert.equal(f.player.element.hidden, true);
+});
+
+test('opening a recording moves focus to its player, honors reduced motion, and returns focus on close', async t => {
+  const f = fixture(t), original = globalThis.matchMedia;
+  globalThis.matchMedia = query => ({ matches: query === '(prefers-reduced-motion: reduce)' });
+  t.after(() => { globalThis.matchMedia = original; });
+  const listen = f.player.listenButton(recording()); listen.focus();
+  await listen.click();
+  assert.equal(document.activeElement, f.player.element);
+  assert.deepEqual(f.player.element.focusOptions, { preventScroll: true });
+  assert.deepEqual(f.player.element.scrollOptions, { behavior: 'auto', block: 'nearest' });
+  assert.equal(f.audio.plays, 0);
+  await f.player.element.all().find(item => item.tag === 'button' && item.textContent === 'Close recording').click();
+  assert.equal(document.activeElement, listen);
+  assert.equal(f.player.element.hidden, true);
 });
 
 test('superseded and aborted media responses cannot replace the selected recording or retain an object URL', async t => {
@@ -304,6 +323,49 @@ test('newest recording groups refresh every ten seconds with a new boundary with
   assert.equal(requests.some(item => item.path.includes('/classification')), false);
   await control(browser, 'Listen').click(); assert.equal(requests.at(-1).path, '/recordings/group-1/file?revision=revision-2');
   assert.deepEqual(f.revoked, [source]);
+});
+
+test('recording polls keep focus on the same recording and fall back to the list when it disappears', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); const f = fixture(t);
+  let items = [group('selected')]; mockGroups(f, () => ({ items, total: items.length }));
+  const browser = createRecordingsBrowser(f.ctx, { locationId: 'room2', player: f.player }); t.after(browser.dispose); await browser.loaded;
+  const first = control(browser, 'Listen'); first.focus();
+  items = [group('newest'), group('selected')]; t.mock.timers.tick(10000); await settle();
+  const selected = browser.element.all().find(node => node.attributes['data-recording-id'] === 'selected');
+  assert.notEqual(selected, first); assert.equal(document.activeElement, selected);
+  assert.deepEqual(selected.focusOptions, { preventScroll: true });
+  items = [group('newest')]; t.mock.timers.tick(10000); await settle();
+  assert.equal(document.activeElement.attributes['aria-label'], 'Saved recordings');
+  const outside = new Element('button'); outside.focus(); t.mock.timers.tick(10000); await settle();
+  assert.equal(document.activeElement, outside, 'background updates must not steal outside focus');
+});
+
+test('closing a recording returns focus to its replacement control after a background refresh', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); const f = fixture(t);
+  let items = [group()]; mockGroups(f, () => ({ items, total: items.length }));
+  const browser = createRecordingsBrowser(f.ctx, { locationId: 'room2', player: f.player }); t.after(browser.dispose); await browser.loaded;
+  const original = control(browser, 'Listen'); await original.click();
+  const source = f.audio.src; t.mock.timers.tick(10000); await settle();
+  assert.equal(f.audio.src, source); assert.equal(document.activeElement, f.player.element);
+  await f.player.element.all().find(item => item.tag === 'button' && item.textContent === 'Close recording').click();
+  assert.notEqual(control(browser, 'Listen'), original);
+  assert.equal(document.activeElement, control(browser, 'Listen'));
+  await control(browser, 'Listen').click(); items = []; t.mock.timers.tick(10000); await settle();
+  await f.player.element.all().find(item => item.tag === 'button' && item.textContent === 'Close recording').click();
+  assert.equal(document.activeElement.attributes['aria-label'], 'Saved recordings');
+});
+
+test('automatic recording refresh leaves paging controls usable while its request is pending', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); const f = fixture(t); let complete;
+  mockGroups(f, () => ({ items: [group()], total: 11 }));
+  const browser = createRecordingsBrowser(f.ctx, { locationId: 'room2', player: f.player }); t.after(browser.dispose); await browser.loaded;
+  const next = control(browser, 'Next recordings →'); next.focus();
+  f.ctx.api = () => new Promise(resolve => { complete = resolve; });
+  t.mock.timers.tick(10000); await settle();
+  assert.equal(next.disabled, false); assert.equal(control(browser, 'Refresh recordings').disabled, false);
+  assert.equal(document.activeElement, next);
+  complete({ items: [group()], total: 11 }); await settle();
+  assert.equal(document.activeElement, next);
 });
 
 test('older pages keep snapshot membership while collecting recordings become ready', async t => {

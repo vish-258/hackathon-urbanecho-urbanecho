@@ -7,16 +7,18 @@ class Element {
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(child => child.textContent || '').join(' '); }
   append(...children) { this.children.push(...children); }
-  replaceChildren(...children) { this._text = ''; this.children = children; }
+  replaceChildren(...children) { if (this.all().includes(document.activeElement)) document.activeElement = null; this._text = ''; this.children = children; }
   setAttribute(name, value) { this.attributes[name] = value; }
   removeAttribute(name) { delete this.attributes[name]; if (name === 'src') this.src = ''; }
   addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); }
   async click() { if (!this.disabled) for (const handler of this.listeners.click || []) await handler({}); }
   all() { return this.children.flatMap(child => [child, ...child.all()]); }
+  querySelectorAll(selector) { return this.all().filter(node => node.tag === selector); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0]; }
   pause() { this.pauses++; }
   load() { this.loads++; }
   play() { this.plays++; }
-  focus() { this.focused = true; }
+  focus(options) { this.focused = true; document.activeElement = this; this.focusOptions = options; }
   scrollIntoView() { this.scrolled = true; }
 }
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -63,6 +65,33 @@ test('provisional analysis refreshes until finalized while keeping the chosen au
   await f.button('Close incident audio').click(); assert.equal(f.audio.src, '');
   assert.deepEqual(f.revoked, ['blob:incident-1', 'blob:incident-2']);
   const count = f.calls.length; t.mock.timers.tick(60000); await settle(); assert.equal(f.calls.length, count);
+});
+
+test('analysis refresh preserves open evidence disclosures and their keyboard focus without resetting playback', async t => {
+  const f = fixture(t, { ...saved(), provisional: true }); await f.panel.loaded;
+  await f.button('Listen to incident audio').click(); const source = f.audio.src, loads = f.audio.loads;
+  const disclosure = label => f.panel.element.querySelectorAll('details').find(node => node.querySelector('summary').textContent === label);
+  const gap = disclosure('Missing audio intervals'), estimate = disclosure('YAMNet details');
+  gap.open = true; estimate.open = true; gap.querySelector('summary').focus();
+  f.setCurrent(saved('version-2')); t.mock.timers.tick(10000); await settle();
+  assert.equal(disclosure('Missing audio intervals').open, true); assert.equal(disclosure('YAMNet details').open, true);
+  assert.equal(document.activeElement, disclosure('Missing audio intervals').querySelector('summary'));
+  assert.deepEqual(document.activeElement.focusOptions, { preventScroll: true });
+  assert.equal(f.audio.src, source); assert.equal(f.audio.loads, loads);
+  const outside = new Element('button'); outside.focus(); await f.panel.refresh();
+  assert.equal(document.activeElement, outside);
+  disclosure('Missing audio intervals').querySelector('summary').focus();
+  const complete = saved('version-3'); complete.audio = { ...complete.audio, gap_count: 0, excluded_count: 0, gaps: [] };
+  f.setCurrent(complete); await f.panel.refresh();
+  assert.equal(document.activeElement, f.panel.element, 'removed evidence disclosure leaves focus in its panel');
+});
+
+test('closing incident audio returns focus to its available listening action', async t => {
+  const f = fixture(t); await f.panel.loaded;
+  await f.button('Listen to incident audio').click();
+  f.button('Close incident audio').focus(); await f.button('Close incident audio').click();
+  assert.equal(document.activeElement, f.button('Listen to incident audio'));
+  assert.equal(f.audio.hidden, true); assert.equal(f.audio.src, '');
 });
 
 test('an active snapshot end is not a closure and recorded coverage is distinct from model input duration', async t => {

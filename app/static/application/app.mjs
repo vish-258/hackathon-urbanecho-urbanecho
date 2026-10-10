@@ -9,7 +9,7 @@ let token='',controller=null,generation=0,routeController=null,routeCleanup=null
 const subscriptions=new Set();
 let pendingLive=liveChanges(),pendingMetadata=liveChanges();
 const isLocalHost=['localhost','127.0.0.1','[::1]'].includes(location.hostname);
-let localAccess=false, sessionPromise=null;
+let localAccess=false, sessionPromise=null, activeRoute=null;
 function accessHeaders(){return localAccess?{'X-Soundwatch-Local':'1'}:token?{Authorization:`Bearer ${token}`}:{}}
 async function localSession(signal){
  if(sessionPromise)return sessionPromise;
@@ -82,18 +82,51 @@ async function startLocal(){
 $('retry-local').onclick=()=>void startLocal();
 $('signout').onclick=disconnect;$('reconnect').onclick=()=>{if(isLocalHost){void startLocal();return;}controller?.abort();generation++;controller=new AbortController();refreshing=null;void connectLoop(controller.signal,generation)};window.addEventListener('pagehide',disconnect);
 document.querySelector('.skip-link').addEventListener('click',e=>{e.preventDefault();$('main').focus();});
-window.addEventListener('hashchange',()=>{if((localAccess||token)&&state.cursor)void renderRoute()});
+window.addEventListener('hashchange',()=>{if((localAccess||token)&&state.cursor)void renderRoute({navigation:true})});
 setInterval(()=>{if((localAccess||token)&&state.cursor){const previous=JSON.stringify([...state.locations.values()].map(l=>[l.data_status,...l.streams.map(s=>s.data_status)]));ageData(state,Date.now()+serverOffset,staleSeconds);if(previous!==JSON.stringify([...state.locations.values()].map(l=>[l.data_status,...l.streams.map(s=>s.data_status)])))liveUpdate();}},1000);
-async function renderRoute(){routeController?.abort();routeCleanup?.();routeCleanup=null;overview?.destroy();overview=null;routeController=new AbortController();ctx.signal=routeController.signal;const signal=ctx.signal;const hash=location.hash.slice(1).replace(/^\//,'');const [path,query='']=hash.split('?');const[page='overview',id]=path.split('/');const labels={overview:'Overview',location:'Location details',incidents:'Incident history',incident:'Incident details',reports:'Daily reports',management:'Management'};const key=labels[page]?page:'overview';$('page-label').textContent=labels[key];document.querySelectorAll('nav a').forEach(a=>{const active=a.dataset.page===(key==='location'?'overview':key==='incident'?'incidents':key);a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')});const container=$('content');container.replaceChildren();try{if(key==='overview'){overview=mountOverview(container);return}container.append(el('p','Loading…','loading'));const target=el('div');container.append(target);let cleanup;if(key==='management'){await refreshMetadata();if(signal.aborted)return;cleanup=await mountManagement(target,routeContext(signal))}else{cleanup=await mountView(target,{page:key,id,params:new URLSearchParams(query)},routeContext(signal))}if(signal.aborted){cleanup?.();return}container.querySelector('.loading')?.remove();routeCleanup=cleanup;}catch(error){if(!signal.aborted)container.replaceChildren(errorBox(error.message),button('Try again',()=>renderRoute()));}}
+async function renderRoute({navigation=false}={}){
+ const hash=location.hash.slice(1).replace(/^\//,'');
+ const [path,query='']=hash.split('?'),[page='overview',id]=path.split('/');
+ const labels={overview:'Overview',location:'Location details',incidents:'Incident history',incident:'Incident details',reports:'Daily reports',management:'Management'};
+ const key=labels[page]?page:'overview',identity=`${key}/${['location','incident'].includes(key)?id||'':''}`;
+ const moveFocus=navigation&&identity!==activeRoute,focusOrigin=document.activeElement;
+ activeRoute=identity;
+ routeController?.abort();routeCleanup?.();routeCleanup=null;overview?.destroy();overview=null;
+ routeController=new AbortController();ctx.signal=routeController.signal;const signal=ctx.signal;
+ document.title=`${labels[key]} · UrbanEcho`;
+ $('page-label').textContent=labels[key];
+ document.querySelectorAll('nav a').forEach(a=>{const active=a.dataset.page===(key==='location'?'overview':key==='incident'?'incidents':key);a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')});
+ const container=$('content');container.replaceChildren();
+ function focusPage(){
+  // Only deliberate page navigation moves focus. A later interaction during
+  // loading takes precedence, as do background reconnects and filter changes.
+  if(!moveFocus||signal.aborted||![focusOrigin,document.body,$('main')].includes(document.activeElement))return;
+  const target=container.querySelector('h1')||$('main');target.tabIndex=-1;target.focus();
+ }
+ try{
+  if(key==='overview'){overview=mountOverview(container);focusPage();return;}
+  const loading=el('p',`Loading ${labels[key].toLowerCase()}…`,'loading');loading.setAttribute('role','status');
+  const target=el('div');target.hidden=true;container.append(loading,target);
+  let cleanup;
+  if(key==='management'){await refreshMetadata();if(signal.aborted)return;cleanup=await mountManagement(target,routeContext(signal));}
+  else cleanup=await mountView(target,{page:key,id,params:new URLSearchParams(query)},routeContext(signal));
+  if(signal.aborted){cleanup?.();return;}
+  // Reveal the completed initial view once, avoiding a loading row above a
+  // growing page that would disappear and shift every control on completion.
+  loading.remove();target.hidden=false;routeCleanup=cleanup;focusPage();
+ }catch(error){
+  if(!signal.aborted){container.replaceChildren(errorBox(error.message),button('Try again',()=>renderRoute()));focusPage();}
+ }
+}
 function routeContext(signal){return {...ctx,signal,get locations(){return ctx.locations},get devices(){return ctx.devices}};}
 function mountOverview(container){
- const heading=el('div','','page-heading'),headingText=el('div');headingText.append(el('div','LIVE MONITORING','eyebrow'),el('h1','A quieter environment starts here.'),el('p','See current sound conditions across your locations.'));heading.append(headingText,button('Manage locations',()=>location.hash='management','secondary'));container.append(heading);
+ const heading=el('div','','page-heading'),headingText=el('div');headingText.append(el('h1','Noise, made visible.'),el('p','See current sound conditions across your locations.'));heading.append(headingText,button('Manage locations',()=>location.hash='management','secondary'));container.append(heading);
  const demoNotice=el('div','Locations marked SIMULATED or SYNTHETIC use generated recordings. They are demonstrations, not physical sound measurements.','notice');demoNotice.hidden=!ctx.locations.some(l=>/simulat|synthetic/i.test(l.name));container.append(demoNotice);
- const stats=el('div','','stats');const counts={},notes={};for(const[key,title,note,icon]of[['locations','Registered locations','Across your monitoring area','⌖'],['reporting','Connected devices','Recent uploads or device messages','↗'],['incidents','Active incidents','Includes recovery in progress','◉'],['stale','Devices needing attention','Connection or sound-reading readiness','◷']]){const card=el('div','',`stat ${key==='incidents'?'alert-stat':''}`);counts[key]=el('strong','—');notes[key]=el('span',note,'stat-note');card.append(el('div',title,'stat-label'),el('span',icon,'stat-icon'),counts[key],notes[key]);stats.append(card);}container.append(stats);
- const contactFeedback=el('p','','muted small');contactFeedback.setAttribute('role','status');container.append(contactFeedback);
+ const stats=el('div','','stats');const counts={},notes={},statCards={};for(const[key,title,note,icon]of[['locations','Registered locations','Across your monitoring area','locations'],['reporting','Connected devices','Recent uploads or device messages','reporting'],['incidents','Active incidents','Includes recovery in progress','alert'],['stale','Devices needing attention','Connection or sound-reading readiness','stale']]){const card=el('div','',`stat stat-${key}`);statCards[key]=card;counts[key]=el('strong','—');notes[key]=el('span',note,'stat-note');card.append(el('div',title,'stat-label'),el('span','',`stat-icon icon icon-${icon}`),counts[key],notes[key]);stats.append(card);}container.append(stats);
+ const contactFeedback=el('p','','muted small contact-feedback');contactFeedback.setAttribute('role','status');container.append(contactFeedback);
  const layout=el('div','','map-layout'),mapPanel=el('section','','panel map-panel'),mapHead=el('div','','panel-head'),mapTitle=el('div');mapTitle.append(el('h2','Your monitoring area'),el('p','Select a marker to explore a location.'));mapHead.append(mapTitle,button('Fit all',()=>fitMap()));mapPanel.append(mapHead);const mapWrap=el('div','','map-wrap'),mapNode=el('div','','geo-map');mapNode.id='geographic-map';mapNode.setAttribute('aria-label','Geographic map of noise monitoring locations');const mapError=el('div','Map tiles could not load. Your location list and markers remain available.','map-error');mapError.hidden=true;mapWrap.append(mapNode,mapError);mapPanel.append(mapWrap);const legend=el('div','','map-legend');for(const[label,tone]of[['Within threshold','good'],['Excessive / recovering','danger'],['Readings unavailable or stale','stale']]){const item=el('span');item.append(el('i','',`dot ${tone}`),document.createTextNode(label));legend.append(item)}mapPanel.append(legend);
- const listPanel=el('section','','panel'),listHead=el('div','','panel-head');const totalLabel=badge('0 locations');listHead.append(el('h2','Locations'),totalLabel);const list=el('div','','location-list');listPanel.append(listHead,list);layout.append(mapPanel,listPanel);container.append(layout);
- const activePanel=el('section','','panel overview-bottom'),activeHead=el('div','','panel-head'),activeTitle=el('div');activeTitle.append(el('h2','Incidents requiring attention'),el('p','An unresolved incident remains visible even when its device stops reporting.'));activeHead.append(activeTitle,button('View history →',()=>location.hash='incidents'));const activeList=el('div');activePanel.append(activeHead,activeList);container.append(activePanel);
+ const listPanel=el('section','','panel location-panel'),listHead=el('div','','panel-head');const totalLabel=badge('0 locations');listHead.append(el('h2','Locations'),totalLabel);const list=el('div','','location-list');listPanel.tabIndex=-1;listPanel.setAttribute('aria-label','Monitoring locations');listPanel.append(listHead,list);layout.append(listPanel,mapPanel);container.append(layout);
+ const activePanel=el('section','','panel overview-bottom'),activeHead=el('div','','panel-head'),activeTitle=el('div');activeTitle.append(el('h2','Incidents requiring attention'),el('p','An unresolved incident remains visible even when its device stops reporting.'));const historyButton=button('View history →',()=>location.hash='incidents');activeHead.append(activeTitle,historyButton);const activeList=el('div');activePanel.append(activeHead,activeList);container.insertBefore(activePanel,layout);
  let map=null,selected=null,destroyed=false,hasFit=false;const contacts=new Map(),markers=new Map();try{if(!window.L)throw new Error('Map library unavailable');map=L.map(mapNode,{scrollWheelZoom:false}).setView([20,0],2);const tiles=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors'}).addTo(map);tiles.on('tileerror',()=>mapError.hidden=false);}catch{mapError.hidden=false;}
  function locations(){return ctx.locations.map(meta=>({...meta,...(state.locations.get(meta.id)||{streams:[],devices:[],noise_status:'unknown',data_status:'unknown'}),name:meta.name,latitude:meta.latitude,longitude:meta.longitude}));}
  function fitMap(){if(!map)return;const positions=locations().filter(validPoint).map(l=>[l.latitude,l.longitude]);if(positions.length){map.fitBounds(positions,{padding:[48,48],maxZoom:14});hasFit=true;}}
@@ -116,18 +149,93 @@ function mountOverview(container){
  }
  function markerLabel(l){const h=health(l),c=condition(l);return `${l.name}: ${h.label}; ${h.needsCalibration?'Calibration required; ':''}${c.label}`;}
  function markerIcon(l){const c=condition(l),h=health(l);return L.divIcon({className:'',html:`<span class="map-pin ${h.needsCalibration&&!c.incident?'stale':c.tone} ${c.incident?'unresolved':''} ${selected===l.id?'selected':''}"></span>`,iconSize:[30,30],iconAnchor:[15,15]});}
- function selectLocation(id,pan=true){selected=id;for(const row of list.children)row.classList.toggle('selected',row.dataset.location===id);const current=locations().find(l=>l.id===id);for(const l of locations()){markers.get(l.id)?.setIcon(markerIcon(l));}const marker=markers.get(id);if(marker){marker.openPopup();if(pan)map.panTo(marker.getLatLng());}if(!current)return;}
- function popup(l){const node=el('div'),reading=readingFor(l),threshold=l.current_threshold,h=health(l);node.append(el('h3',l.name),locationBadges(l),el('p',formatLevel(reading?.measurement_value,reading?.measurement_type)),el('p',`Threshold: ${formatLevel(threshold?.threshold_value,threshold?.threshold_type)}`),el('p',`Last device contact: ${formatTime(h.lastContact,l.timezone)}`));if(reading)node.append(el('p',`Measured: ${formatTime(reading.measured_at,l.timezone)}`));if(h.needsCalibration)node.append(el('p','SPL readings need microphone calibration. Contact does not establish a calibrated sound level.'));const a=el('a','View location →');a.href=`#location/${l.id}`;node.append(a);return node;}
- function update(){if(destroyed)return;const locs=locations(),active=[...state.incidents.values()].filter(i=>['active','recovering'].includes(i.status));counts.locations.textContent=ctx.locations.length;let connected=0,reporting=0,attention=0,calibration=0,disconnected=0,readingAttention=0;for(const d of ctx.devices.filter(d=>d.enabled)){
- const current=state.locations.get(d.location_id),meta=ctx.locations.find(l=>l.id===d.location_id);
- const connection=deviceConnection(d,current,{contact:contacts.get(d.id),now:ctx.serverNow(),staleSeconds:ctx.dataStaleSeconds()}),r=deviceReadingStatus(d,meta,current);
- if(connection.connected)connected++;else disconnected++;
- if(r.reporting&&!r.needsCalibration)reporting++;
- if(r.needsCalibration)calibration++;
- if(!r.needsCalibration&&(!r.reporting||r.attention))readingAttention++;
- if(!connection.connected||!r.reporting||r.attention||r.needsCalibration)attention++;
- }counts.reporting.textContent=connected;notes.reporting.textContent=`${reporting} with usable readings · contact checked every 2 s`;counts.stale.textContent=attention;notes.stale.textContent=attention?[calibration?`${calibration} need calibration`:'',disconnected?`${disconnected} without recent contact`:'',readingAttention?`${readingAttention} need usable readings`:''].filter(Boolean).join(' · '):'All enabled devices have recent usable readings';counts.incidents.textContent=active.length;totalLabel.textContent=`${locs.length} locations`;demoNotice.hidden=!locs.some(l=>/simulat|synthetic/i.test(l.name));
- const focused=document.activeElement?.dataset?.selectLocation;list.replaceChildren();for(const l of locs){const reading=readingFor(l),h=health(l),row=el('article','',`location-row ${selected===l.id?'selected':''}`);row.dataset.location=l.id;const top=el('div','','row-top'),choose=button(l.name,()=>selectLocation(l.id),'location-select');choose.dataset.selectLocation=l.id;top.append(choose,locationBadges(l));const level=el('div',Number.isFinite(reading?.measurement_value)?reading.measurement_value.toFixed(1):'—','level');if(Number.isFinite(reading?.measurement_value))level.append(el('span',unit(reading.measurement_type),'unit'));const limit=el('div',`Threshold ${formatLevel(l.current_threshold?.threshold_value,l.current_threshold?.threshold_type)}`,'muted small'),bottom=el('div','','row-bottom'),link=el('a','Details →');link.href=`#location/${l.id}`;bottom.append(el('span',reading?formatTime(reading.measured_at,l.timezone):h.needsCalibration?'Awaiting calibrated reading':'No eligible readings yet'),link);row.append(top,level,limit);row.append(el('p',`Last device contact: ${formatTime(h.lastContact,l.timezone)}`,'muted small'));if(h.needsCalibration)row.append(el('p','SPL readings need microphone calibration. Recordings can arrive while calibrated readings remain unavailable.','muted small'));row.append(bottom);list.append(row);if(map&&validPoint(l)){let marker=markers.get(l.id);if(!marker){marker=L.marker([l.latitude,l.longitude],{icon:markerIcon(l),title:l.name,alt:markerLabel(l),keyboard:true}).addTo(map);marker.bindPopup(popup(l));marker.on('click',()=>selectLocation(l.id,false));markers.set(l.id,marker);}else{marker.setLatLng([l.latitude,l.longitude]);marker.setIcon(markerIcon(l));marker.setPopupContent(popup(l));}marker.options.title=l.name;marker.options.alt=markerLabel(l);const markerNode=marker.getElement();if(markerNode){markerNode.title=l.name;markerNode.setAttribute('aria-label',marker.options.alt);}}}if(focused)list.querySelector(`[data-select-location="${focused}"]`)?.focus({preventScroll:true});if(!locs.length)list.append(empty('No locations registered','Add your first location in Management.'));if(map&&!hasFit&&locs.length)fitMap();activeList.replaceChildren();for(const i of active.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at)).slice(0,5)){const row=el('div','','incident-preview'),a=el('div'),b=el('div');a.append(el('strong',ctx.locations.find(l=>l.id===i.location_id)?.name||i.location_snapshot?.name||short(i.location_id)),el('small',`Device ${deviceLabel(i,ctx.devices)}`));b.append(badge(i.status,i.status),el('small',`Peak ${formatLevel(i.peak_db,i.threshold_type||i.measurement_type)} · Threshold ${formatLevel(i.threshold_value,i.threshold_type||i.measurement_type)}`));row.append(a,b,button('View incident',()=>location.hash=`incident/${i.id}`));activeList.append(row);}if(!active.length)activeList.append(empty('No unresolved noise incidents','New incidents will appear here when an eligible reading exceeds its location’s threshold.'));}
+ // Polling replaces rows and Leaflet icons; retain the user's place and control.
+ function rememberFocus(){
+  const element=document.activeElement;
+  return {element,key:element?.dataset?.overviewFocus,markerId:[...markers].find(([,marker])=>marker.getElement()===element)?.[0],scrollTop:list.scrollTop,scrollLeft:list.scrollLeft};
+ }
+ function restoreFocus(saved){
+  let target=saved.key?[...container.querySelectorAll('[data-overview-focus]')].find(node=>node.dataset.overviewFocus===saved.key):null;
+  if(saved.markerId)target=markers.get(saved.markerId)?.getElement();
+  // If the focused incident resolves or a location disappears, keep navigation nearby.
+  if(!target&&saved.key)target=saved.key.startsWith('incident:')?historyButton:listPanel;
+  if(target&&target!==document.activeElement)target.focus({preventScroll:true});
+  list.scrollTop=saved.scrollTop;list.scrollLeft=saved.scrollLeft;
+ }
+ function selectLocation(id,pan=true){
+  const saved=rememberFocus();selected=id;
+  for(const row of list.children)row.classList.toggle('selected',row.dataset.location===id);
+  for(const l of locations())markers.get(l.id)?.setIcon(markerIcon(l));
+  const marker=markers.get(id);
+  if(marker){marker.openPopup();if(pan)map.panTo(marker.getLatLng());}
+  restoreFocus(saved);
+  if(marker&&pan&&window.matchMedia?.('(max-width: 600px)').matches){
+   mapPanel.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
+  }
+ }
+ function popup(l){const node=el('div'),reading=readingFor(l),threshold=l.current_threshold,h=health(l);node.append(el('h3',l.name),locationBadges(l),el('p',formatLevel(reading?.measurement_value,reading?.measurement_type)),el('p',`Threshold: ${formatLevel(threshold?.threshold_value,threshold?.threshold_type)}`),el('p',`Last device contact: ${formatTime(h.lastContact,l.timezone)}`));if(reading)node.append(el('p',`Measured: ${formatTime(reading.measured_at,l.timezone)}`));if(h.needsCalibration)node.append(el('p','SPL readings need microphone calibration. Contact does not establish a calibrated sound level.'));const a=el('a','View location →');a.href=`#location/${l.id}`;a.dataset.overviewFocus=`popup:${l.id}`;a.setAttribute('aria-label',`View location details for ${l.name}`);node.append(a);return node;}
+ function update(){
+  if(destroyed)return;
+  const saved=rememberFocus();
+  const locs=locations(),active=[...state.incidents.values()].filter(i=>['active','recovering'].includes(i.status));
+  counts.locations.textContent=ctx.locations.length;
+  let connected=0,reporting=0,attention=0,calibration=0,disconnected=0,readingAttention=0;
+  for(const d of ctx.devices.filter(d=>d.enabled)){
+   const current=state.locations.get(d.location_id),meta=ctx.locations.find(l=>l.id===d.location_id);
+   const connection=deviceConnection(d,current,{contact:contacts.get(d.id),now:ctx.serverNow(),staleSeconds:ctx.dataStaleSeconds()}),r=deviceReadingStatus(d,meta,current);
+   if(connection.connected)connected++;else disconnected++;
+   if(r.reporting&&!r.needsCalibration)reporting++;
+   if(r.needsCalibration)calibration++;
+   if(!r.needsCalibration&&(!r.reporting||r.attention))readingAttention++;
+   if(!connection.connected||!r.reporting||r.attention||r.needsCalibration)attention++;
+  }
+  counts.reporting.textContent=connected;notes.reporting.textContent=`${reporting} with usable readings · contact checked every 2 s`;
+  counts.stale.textContent=attention;notes.stale.textContent=attention?[calibration?`${calibration} need calibration`:'',disconnected?`${disconnected} without recent contact`:'',readingAttention?`${readingAttention} need usable readings`:''].filter(Boolean).join(' · '):'All enabled devices have recent usable readings';
+  counts.incidents.textContent=active.length;
+  statCards.incidents.classList.toggle('alert-stat',active.length>0);
+  statCards.stale.classList.toggle('attention-stat',attention>0);
+  totalLabel.textContent=`${locs.length} locations`;demoNotice.hidden=!locs.some(l=>/simulat|synthetic/i.test(l.name));
+  const prioritizeIncidents=active.length>0;
+  activePanel.classList.toggle('overview-priority',prioritizeIncidents);
+  list.replaceChildren();
+  for(const l of locs){
+   const reading=readingFor(l),h=health(l),row=el('article','',`location-row ${selected===l.id?'selected':''}`);row.dataset.location=l.id;
+   const top=el('div','','row-top'),choose=button(l.name,()=>selectLocation(l.id),'location-select');
+   choose.dataset.selectLocation=l.id;choose.dataset.overviewFocus=`location:${l.id}`;
+   choose.title=`Show ${l.name} on map`;choose.setAttribute('aria-label',choose.title);top.append(choose,locationBadges(l));
+   const level=el('div',Number.isFinite(reading?.measurement_value)?reading.measurement_value.toFixed(1):'—','level');
+   if(Number.isFinite(reading?.measurement_value))level.append(el('span',unit(reading.measurement_type),'unit'));
+   const limit=el('div',`Threshold ${formatLevel(l.current_threshold?.threshold_value,l.current_threshold?.threshold_type)}`,'muted small'),bottom=el('div','','row-bottom'),link=el('a','Details →');
+   link.href=`#location/${l.id}`;link.dataset.overviewFocus=`details:${l.id}`;link.setAttribute('aria-label',`View location details for ${l.name}`);
+   bottom.append(el('span',reading?`Measured ${formatTime(reading.measured_at,l.timezone)}`:h.needsCalibration?'Awaiting calibrated reading':'No eligible readings yet'),link);
+   row.append(top,level,limit,el('p',`Last device contact: ${formatTime(h.lastContact,l.timezone)}`,'muted small'));
+   if(h.needsCalibration)row.append(el('p','SPL readings need microphone calibration. Recordings can arrive while calibrated readings remain unavailable.','muted small'));
+   row.append(bottom);list.append(row);
+   if(map&&validPoint(l)){
+    let marker=markers.get(l.id);
+    if(!marker){
+     marker=L.marker([l.latitude,l.longitude],{icon:markerIcon(l),title:l.name,alt:markerLabel(l),keyboard:true}).addTo(map);
+     marker.bindPopup(popup(l));marker.on('click',()=>selectLocation(l.id,false));markers.set(l.id,marker);
+    }else{marker.setLatLng([l.latitude,l.longitude]);marker.setIcon(markerIcon(l));marker.setPopupContent(popup(l));}
+    marker.options.title=l.name;marker.options.alt=markerLabel(l);
+    const markerNode=marker.getElement();
+    if(markerNode){markerNode.title=l.name;markerNode.setAttribute('aria-label',marker.options.alt);}
+   }
+  }
+  if(!locs.length)list.append(empty('No locations registered','Add your first location in Management.'));
+  if(map&&!hasFit&&locs.length)fitMap();
+  activeList.replaceChildren();
+  for(const i of active.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at)).slice(0,5)){
+   const row=el('div','','incident-preview'),a=el('div'),b=el('div'),name=ctx.locations.find(l=>l.id===i.location_id)?.name||i.location_snapshot?.name||short(i.location_id);
+   a.append(el('strong',name),el('small',`Device ${deviceLabel(i,ctx.devices)}`));
+   b.append(badge(i.status,i.status),el('small',`Peak ${formatLevel(i.peak_db,i.threshold_type||i.measurement_type)} · Threshold ${formatLevel(i.threshold_value,i.threshold_type||i.measurement_type)}`));
+   const action=button('View incident',()=>location.hash=`incident/${i.id}`);action.dataset.overviewFocus=`incident:${i.id}`;action.setAttribute('aria-label',`View incident at ${name}`);
+   row.append(a,b,action);activeList.append(row);
+  }
+  if(!active.length)activeList.append(empty('No unresolved noise incidents','New incidents will appear here when an eligible reading exceeds its location’s threshold.'));
+  restoreFocus(saved);
+ }
+
  update();const stopContacts=startDeviceContactMonitor({api:ctx.api,signal:ctx.signal,contacts,now:()=>ctx.serverNow(),onUpdate:update,onError:error=>{if(!destroyed)contactFeedback.textContent=error?'Contact check unavailable; retrying. Times shown are the last confirmed contact.':'';}});requestAnimationFrame(()=>{if(!destroyed){map?.invalidateSize();fitMap()}});return{update,destroy(){destroyed=true;stopContacts();map?.remove();}};
 }
 

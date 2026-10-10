@@ -8,19 +8,23 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
  const cancelLocation=()=>{formController?.abort();stopContacts();stopContacts=()=>{};};
  const stopUpdates=()=>{cancelLocation();stopLive();deviceStatusCells.clear();};
  ctx.signal.addEventListener('abort',stopUpdates,{once:true});
- const heading=el('div','','page-heading');const headingText=el('div');headingText.append(el('div','CONFIGURATION','eyebrow'),el('h1','Management'),el('p','Manage the places, devices, and rules behind your monitoring.'));heading.append(headingText);container.append(heading);
+ const heading=el('div','','page-heading');const headingText=el('div');headingText.append(el('h1','Management'),el('p','Manage the places, devices, and rules behind your monitoring.'));heading.append(headingText);container.append(heading);
  const tabs=el('div','','tabbar'),body=el('div');container.append(tabs,body);
  const choices=[['locations','Locations'],['devices','Devices'],['thresholds','Thresholds']];
- function paintTabs(){tabs.replaceChildren();for(const[key,label]of choices)tabs.append(button(label,()=>{tab=key;editing=null;render()},tab===key?'active':''));}
+ tabs.setAttribute('role','group');tabs.setAttribute('aria-label','Management sections');
+ const tabButtons=new Map();
+ for(const[key,label]of choices){const control=button(label,()=>{tab=key;editing=null;render()});tabButtons.set(key,control);tabs.append(control);}
+ function paintTabs(){for(const[key,control]of tabButtons){control.className=`button ${tab===key?'active':''}`;control.setAttribute('aria-pressed',String(tab===key));}}
  function render(){cancelLocation();deviceStatusCells.clear();formController=new AbortController();paintTabs();body.replaceChildren();if(tab==='locations')locations();if(tab==='devices')devices();if(tab==='thresholds')thresholds();}
  function confirmInline(message,target){const line=el('p',message,'muted small');line.setAttribute('role','status');target?.replaceChildren(line);}
  async function submit(form,action,success,keepEditing=null){const feedback=form.querySelector('.feedback');feedback.replaceChildren();const btn=form.querySelector('[type=submit]');btn.disabled=true;try{await action();await ctx.refresh();editing=keepEditing;render();confirmInline(success,body.querySelector('.feedback'));}catch(err){feedback.append(errorBox(err.message));}finally{btn.disabled=false;}}
- function formShell(title,description){const p=el('section','','panel'),inner=el('div','','panel-body'),f=el('form');inner.append(el('h2',title),el('p',description,'muted small'));f.append(el('div','','feedback'));inner.append(f);p.append(inner);return{p,f};}
+ function formShell(title,description){const p=el('section','','panel management-form'),inner=el('div','','panel-body'),f=el('form'),heading=el('h2',title);heading.id='management-form-title';heading.tabIndex=-1;p.setAttribute('aria-labelledby',heading.id);inner.append(heading,el('p',description,'muted small'));f.append(el('div','','feedback'));inner.append(f);p.append(inner);return{p,f};}
+ function focusForm(){const title=body.querySelector('#management-form-title');title?.focus({preventScroll:true});title?.scrollIntoView({block:'nearest',behavior:globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});}
  function saveButton(f,label){const actions=el('div','','form-actions'),save=button(label,null,'primary');save.type='submit';actions.append(save);if(editing)actions.append(button('Cancel',()=>{editing=null;render()}));f.append(actions);}
  function rules(value={threshold_type:'spl_z_leq',threshold_value:60,interval_seconds:1,recovery_count:3}){
   const group=el('div','','form-grid'),method=select([['spl_z_leq','dB SPL (Z) · requires calibration'],['dbfs_rms','dBFS · digital signal level']],value.threshold_type);
   const level=input('number',value.threshold_value,{required:true,step:'any'}),interval=input('number',value.interval_seconds,{required:true,min:'1',max:'60',step:'1'}),recovery=input('number',value.recovery_count||3,{required:true,min:'1',max:'100',step:'1'});
-  const explanation=el('div','','notice');explanation.setAttribute('style','grid-column:1 / -1');
+  const explanation=el('div','','notice threshold-explanation full');
   const scale=el('p'),comparison=el('p'),recoveryHint=el('p');explanation.append(el('strong','How incidents appear on Overview'),scale,comparison,recoveryHint);
   function explain(){
    const digital=method.value==='dbfs_rms',threshold=String(level.value).trim();
@@ -38,12 +42,12 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
 
  function locations(){
   const layout=el('div','','management-layout');body.append(layout);
-  const list=el('section','','panel');list.append(el('div','Registered locations','panel-head'));
+  const list=el('section','','panel');const listHead=el('div','','panel-head');listHead.append(el('h2','Registered locations'));list.append(listHead);
   const rows=el('div','','management-list');
   for(const loc of ctx.locations){
    const row=el('div','','management-item'),text=el('div');
    text.append(el('h3',loc.name),el('p',`${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)} · ${loc.timezone}`),el('p',formatLevel(loc.current_threshold?.threshold_value,loc.current_threshold?.threshold_type)));
-   row.append(text,button('Edit',()=>{editing=loc.id;render()}));rows.append(row);
+   const edit=button('Edit',()=>{editing=loc.id;render();focusForm()});edit.setAttribute('aria-label',`Edit location ${loc.name}`);row.append(text,edit);rows.append(row);
   }
   if(!ctx.locations.length)rows.append(empty('No locations yet','Create your first monitoring location.'));
   list.append(rows);layout.append(list);
@@ -126,24 +130,26 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
    onError:error=>{feedback.textContent=error?'Contact check unavailable; retrying. Times shown are the last confirmed contact.':'';}});
  }
  function devices(){
-  const mapping=el('section','','panel');
-  mapping.append(el('div','Device-to-location mapping','panel-head'));
-  mapping.append(el('p','Connection shows recent uploads or diagnostic messages; Readings shows whether sound measurements are usable. Contact is checked every 2 seconds while this tab is open. SPL readings still require microphone calibration.','muted small'));
-  const contactFeedback=el('p','','muted small');contactFeedback.setAttribute('role','status');mapping.append(contactFeedback);
+  const mapping=el('section','','panel management-mapping'),mappingHead=el('div','','panel-head');
+  mappingHead.append(el('h2','Device-to-location mapping'));mapping.append(mappingHead);
+  const introduction=el('div','','panel-intro');
+  introduction.append(el('p','Connection shows recent uploads or diagnostic messages; Readings shows whether sound measurements are usable. Contact is checked every 2 seconds while this tab is open. SPL readings still require microphone calibration.','muted small'));
+  const contactFeedback=el('p','','muted small');contactFeedback.setAttribute('role','status');introduction.append(contactFeedback);mapping.append(introduction);
   const wrap=el('div','','view-table-wrap');wrap.tabIndex=0;wrap.setAttribute('role','region');wrap.setAttribute('aria-label','Device IDs and assigned geographic locations');
   const table=el('table','','view-table'),head=el('thead'),header=el('tr'),rows=el('tbody');
   table.append(el('caption','Device IDs and assigned geographic locations','sr-only'));
   for(const title of ['Device ID','Location','Coordinates','Status','Mapping']){const th=el('th',title);th.scope='col';header.append(th);}head.append(header);
   for(const d of ctx.devices){
    const row=el('tr'),identity=el('td'),place=el('td'),coordinates=el('td'),status=el('td','','device-contact-status'),actions=el('td');
+   place.setAttribute('data-label','Location');coordinates.setAttribute('data-label','Coordinates');
    const loc=ctx.locations.find(l=>l.id===d.location_id);
    identity.append(el('strong',d.external_id||d.id),el('p',d.microphone_model,'muted small'));
    place.textContent=loc?.name||'Unassigned';
    coordinates.append(el('div',loc?`${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}`:'—'),el('small',loc?.timezone||'','muted'));
    deviceStatusCells.set(d.id,{status,place,coordinates});
-   actions.append(button('Edit mapping',()=>{editing=d.id;render()}));row.append(identity,place,coordinates,status,actions);rows.append(row);
+   const edit=button('Edit mapping',()=>{editing=d.id;render();focusForm()});edit.setAttribute('aria-label',`Edit mapping for ${d.external_id||d.id}`);actions.append(edit);row.append(identity,place,coordinates,status,actions);rows.append(row);
   }
-  table.append(head,rows);wrap.append(table);mapping.append(wrap);
+  table.append(head,rows);wrap.append(table);if(ctx.devices.length)mapping.append(el('p','Scroll horizontally to see all device details and mapping actions.','table-scroll-hint'));mapping.append(wrap);
   updateDeviceStatuses();
   if(!ctx.devices.length)mapping.append(empty('No devices yet','Register the ID sent by your device and choose its location below.'));
   body.append(mapping);
