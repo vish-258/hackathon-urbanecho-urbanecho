@@ -8,7 +8,7 @@ import { createIncidentAudio } from './incident-audio.mjs';
 const PAGE_SIZE = 25;
 const CHART_PAGE = 200;
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const SERIES_COLORS = ['#186f65', '#5b58a5', '#b6691c', '#256fad', '#aa4a7b', '#57672a'];
+const SERIES_COLORS = ['var(--chart-series-1)', 'var(--chart-series-2)', 'var(--chart-series-3)', 'var(--chart-series-4)', 'var(--chart-series-5)', 'var(--chart-series-6)'];
 const SERIES_DASHES = ['', '7 3', '2 3', '9 3 2 3', '4 3', '1 3'];
 const isNumber = value => typeof value === 'number' && Number.isFinite(value);
 const readable = value => String(value || 'unavailable').replaceAll('_', ' ');
@@ -119,9 +119,8 @@ function link(text, hash, ctx, className = 'text-link') {
   return node;
 }
 
-function heading(title, subtitle, eyebrow = '') {
+function heading(title, subtitle) {
   const node = el('div', '', 'page-heading view-heading');
-  if (eyebrow) node.append(el('p', eyebrow, 'eyebrow'));
   node.append(el('h1', title), el('p', subtitle, 'muted'));
   return node;
 }
@@ -173,7 +172,10 @@ function table(headers, rows, caption) {
   });
   node.append(cap, head, body);
   wrap.append(node);
-  return wrap;
+  if (headers.length < 5) return wrap;
+  const group = el('div', '', 'view-table-group');
+  group.append(el('p', 'Scroll horizontally to see all columns.', 'table-scroll-hint'), wrap);
+  return group;
 }
 
 function stack(primary, secondary) {
@@ -181,6 +183,23 @@ function stack(primary, secondary) {
   node.append(typeof primary === 'object' ? primary : el('span', primary));
   if (secondary) node.append(el('small', secondary, 'muted'));
   return node;
+}
+
+function replaceTableContent(container, content) {
+  const previous = container.querySelector('.view-table-wrap');
+  const links = previous ? [...previous.querySelectorAll('a')] : [];
+  const focused = links.find(link => link === document.activeElement);
+  const regionFocused = previous && previous === document.activeElement;
+  const scrollLeft = previous?.scrollLeft || 0;
+  container.replaceChildren(content);
+  const next = container.querySelector('.view-table-wrap');
+  if (next) next.scrollLeft = scrollLeft;
+  if (focused || regionFocused) {
+    const replacement = focused && next ? [...next.querySelectorAll('a')].find(link => link.href === focused.href && link.textContent === focused.textContent) : null;
+    const target = replacement || next || container;
+    if (target === container) target.tabIndex = -1;
+    target.focus({ preventScroll: true });
+  }
 }
 
 function errorMessage(error) {
@@ -278,12 +297,12 @@ function chartNode(rows, versions, method, start, end, timezone, fit, devices = 
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const x = value => left + (value - xStart) / (xEnd - xStart) * plotWidth;
   const y = value => top + (max - value) / (max - min) * plotHeight;
-  const chart = svg('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Sound-level chart in ${unit(method)}. Readings are separated by device. Dashed red lines show the threshold. Missing readings appear as gaps.` });
+  const chart = svg('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Sound-level chart in ${unit(method)}. Readings are separated by device. Dashed lines show the threshold. Missing readings appear as gaps.` });
   chart.append(svg('title', {}, `Historical sound levels · ${unit(method)}`));
   for (let index = 0; index <= 4; index++) {
     const value = min + (max - min) * index / 4;
     const py = y(value);
-    chart.append(svg('line', { x1: left, y1: py, x2: width - right, y2: py, stroke: '#e3e8e5', 'stroke-width': 1 }));
+    chart.append(svg('line', { x1: left, y1: py, x2: width - right, y2: py, stroke: 'var(--line)', 'stroke-width': 1 }));
     chart.append(svg('text', { x: left - 13, y: py + 4, 'text-anchor': 'end', class: 'chart-axis-text' }, Number(value.toFixed(1))));
   }
   for (let index = 0; index <= 4; index++) {
@@ -298,7 +317,7 @@ function chartNode(rows, versions, method, start, end, timezone, fit, devices = 
     const lineStart = Math.max(xStart, new Date(rule.effective_at).getTime());
     const lineEnd = Math.min(xEnd, index + 1 < allRules.length ? new Date(allRules[index + 1].effective_at).getTime() : xEnd);
     if (rule.threshold_type !== method || lineEnd <= lineStart) return;
-    const path = svg('line', { x1: x(lineStart), y1: y(rule.threshold_value), x2: x(lineEnd), y2: y(rule.threshold_value), stroke: '#b9473e', 'stroke-width': 1.7, 'stroke-dasharray': '6 5' });
+    const path = svg('line', { x1: x(lineStart), y1: y(rule.threshold_value), x2: x(lineEnd), y2: y(rule.threshold_value), stroke: 'var(--danger)', 'stroke-width': 1.7, 'stroke-dasharray': '6 5' });
     path.append(svg('title', {}, `Threshold revision ${rule.revision}: ${rule.threshold_value} ${unit(method)} · effective ${rule.effective_at}`));
     chart.append(path);
   });
@@ -324,7 +343,7 @@ function chartNode(rows, versions, method, start, end, timezone, fit, devices = 
       const time = new Date(row.measured_at).getTime();
       if (time < xStart || time > xEnd) return;
       const exact = `Device ${deviceLabel({device_id: deviceId}, devices)} · ${row.value_db} ${unit(method)} · ${formatTime(row.measured_at, timezone)} (${row.measured_at}) · saved threshold ${isNumber(row.threshold_value) ? `${row.threshold_value} ${unit(row.threshold_type)}` : 'unavailable'}${row.evaluation?.diagnostic ? ` · ${readable(row.evaluation.diagnostic)}` : ''}`;
-      const point = svg('circle', { cx: x(time), cy: y(row.value_db), r: 4.3, fill: color, stroke: '#fff', 'stroke-width': 1.7, tabindex: 0, role: 'img', 'aria-label': exact, class: 'chart-reading' });
+      const point = svg('circle', { cx: x(time), cy: y(row.value_db), r: 4.3, fill: color, stroke: 'var(--surface)', 'stroke-width': 1.7, tabindex: 0, role: 'img', 'aria-label': exact, class: 'chart-reading' });
       point.append(svg('title', {}, exact));
       point.addEventListener('focus', () => { tooltip.textContent = exact; });
       point.addEventListener('pointerenter', () => { tooltip.textContent = exact; });
@@ -338,10 +357,15 @@ function chartNode(rows, versions, method, start, end, timezone, fit, devices = 
   });
   const thresholdLegend = el('span', '', 'chart-legend-item');
   const line = svg('svg', { width: 25, height: 10, 'aria-hidden': true });
-  line.append(svg('line', { x1: 0, y1: 5, x2: 25, y2: 5, stroke: '#b9473e', 'stroke-width': 1.7, 'stroke-dasharray': '6 5' }));
+  line.append(svg('line', { x1: 0, y1: 5, x2: 25, y2: 5, stroke: 'var(--danger)', 'stroke-width': 1.7, 'stroke-dasharray': '6 5' }));
   thresholdLegend.append(line, el('span', 'Threshold at that time'));
   legend.append(thresholdLegend);
-  wrapper.append(chart, legend, tooltip);
+  const viewport = el('div', '', 'chart-viewport');
+  viewport.tabIndex = 0;
+  viewport.setAttribute('role', 'region');
+  viewport.setAttribute('aria-label', 'Sound-level chart. Scroll horizontally to explore the full time range.');
+  viewport.append(chart);
+  wrapper.append(el('p', 'Scroll sideways to explore the full timeline.', 'chart-scroll-hint'), viewport, legend, tooltip);
   return wrapper;
 }
 
@@ -351,8 +375,8 @@ async function locationView(container, route, ctx) {
   const location = await safeApi(ctx, `/locations/${encodeURIComponent(route.id)}`);
   let assignedDevices = ctx.devices.filter(device => device.location_id === location.id);
   if (ctx.signal?.aborted) return () => {};
-  const title = heading(location.name, `${Number(location.latitude).toFixed(5)}, ${Number(location.longitude).toFixed(5)} · ${location.timezone}`, 'Location detail');
-  container.append(link('← All locations', '#/overview', ctx), title);
+  const title = heading(location.name, `${Number(location.latitude).toFixed(5)}, ${Number(location.longitude).toFixed(5)} · ${location.timezone}`);
+  container.append(link('← All locations', '#/overview', ctx, 'text-link view-back-link'), title);
   if (/SYNTHETIC|SIMULATED|DEMO/i.test(location.name)) container.append(el('div', 'Simulated location · readings are demonstration data, not calibrated environmental measurements.', 'view-demo-note'));
   const summary = el('div', '', 'view-metric-grid');
   const chartSection = section('Sound levels over time', 'Stored measurements and the threshold that applied at the time.');
@@ -552,7 +576,7 @@ async function locationView(container, route, ctx) {
 async function incidentsView(container, route, ctx) {
   let disposed = false, offset = 0, generation = 0, total = 0;
   const queryFromHash = new URLSearchParams(location.hash.split('?')[1] || '');
-  container.append(heading('Incident history', 'Follow every excessive-noise event, from its first breach to its resolution.', 'Records'));
+  container.append(heading('Incident history', 'Follow every excessive-noise event, from its first breach to its resolution.'));
   const panel = section('Saved incidents', 'Search by location name, device code (for example UE-001), internal device ID, or microphone model. Historical location names are included.');
   const filters = el('form', '', 'view-filter-grid');
   const search = el('input'); search.type = 'search'; search.placeholder = 'Location or device code, e.g. UE-001'; search.maxLength = 200;
@@ -592,7 +616,7 @@ async function incidentsView(container, route, ctx) {
       const result = await safeApi(ctx, `/incidents?${requestedQuery}`);
       if (disposed || ownGeneration !== generation || ctx.signal?.aborted || requestedQuery !== params().toString()) return;
       total = result.total;
-      body.replaceChildren(result.items.length ? incidentTable(result.items, ctx, 'UTC') : empty('No matching incidents', 'Try another date range, location, or status. No results does not mean the location has recorded complete coverage.'));
+      replaceTableContent(body, result.items.length ? incidentTable(result.items, ctx, 'UTC') : empty('No matching incidents', 'Try another date range, location, or status. No results does not mean the location has recorded complete coverage.'));
       count.textContent = total ? `${offset + 1}–${Math.min(offset + PAGE_SIZE, total)} of ${total} incidents · times in UTC` : '0 incidents · times in UTC';
       previous.disabled = offset === 0;
       next.disabled = offset + PAGE_SIZE >= total;
@@ -613,8 +637,8 @@ async function incidentsView(container, route, ctx) {
 
 async function incidentView(container, route, ctx) {
   let disposed = false, offset = 0, generation = 0;
-  container.append(link('← Incident history', '#/incidents', ctx));
-  const title = heading('Incident detail', `Record ${route.id}`, 'Saved event');
+  container.append(link('← Incident history', '#/incidents', ctx, 'text-link view-back-link'));
+  const title = heading('Incident detail', `Record ${route.id}`);
   const summary = el('div', '', 'view-metric-grid');
   const identity = section('Incident record');
   const detailBody = el('div'); identity.append(detailBody);
@@ -677,7 +701,7 @@ async function incidentView(container, route, ctx) {
 async function reportsView(container, route, ctx) {
   let disposed = false, timer, generation = 0, current = null, busy = false;
   const query = route.params || new URLSearchParams(location.hash.split('?')[1] || '');
-  container.append(heading('Daily reports', 'Saved sound levels, incident starts, and recording coverage for each location’s local day.', 'Reports'));
+  container.append(heading('Daily reports', 'Saved sound levels, incident starts, and recording coverage for each location’s local day.'));
   if (!ctx.locations.length) {
     container.append(empty('No locations yet', 'Add a location in Management before generating its daily summary.'), link('Open Management →', '#/management', ctx));
     return () => {};

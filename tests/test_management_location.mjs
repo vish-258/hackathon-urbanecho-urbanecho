@@ -19,6 +19,22 @@ class Element {
  async click(){if(this.disabled)return;for(const handler of this.listeners.click||[])await handler({});}
 }
 const position={latitude:12.1234567,longitude:77.7654321,accuracy:25,timestamp:Date.now()};
+
+test('Management keeps section controls mounted and exposes the selected section',async t=>{
+ const f=await setup(t,async()=>position);
+ const locations=f.button('Locations'),devices=f.button('Devices');
+ assert.equal(locations.attributes['aria-pressed'],'true');
+ assert.equal(devices.attributes['aria-pressed'],'false');
+ await devices.click();
+ assert.equal(f.button('Devices'),devices,'switching sections retains the focused button');
+ assert.equal(f.button('Locations'),locations);
+ assert.equal(devices.attributes['aria-pressed'],'true');
+ assert.equal(locations.attributes['aria-pressed'],'false');
+ await locations.click();
+ assert.equal(f.button('Locations'),locations);
+ assert.equal(locations.attributes['aria-pressed'],'true');
+});
+
 async function setup(t,locate){
  const previous=globalThis.document;
  globalThis.document={createElement:tag=>new Element(tag)};

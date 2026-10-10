@@ -22,16 +22,17 @@ const calibrationLabel = recording => recording.calibration_status === 'mixed' ?
 // Media is fetched only after Listen, and native controls start playback.
 export function createRecordingPlayer(ctx, { timezone, urls = URL } = {}) {
   const element = el('div', '', 'recording-player'); element.hidden = true;
+  element.tabIndex = -1; element.setAttribute('role', 'region'); element.setAttribute('aria-label', 'Saved recording');
   const title = el('strong'), status = el('p', '', 'muted small'); status.setAttribute('role', 'status');
   const audio = el('audio'); audio.controls = true; audio.preload = 'none'; audio.hidden = true;
   audio.setAttribute('aria-label', 'Saved recording playback');
   const classification = el('div'), classificationFeedback = el('p', '', 'muted small');
   classificationFeedback.setAttribute('role', 'status');
-  const close = button('Close recording', () => clear(), 'secondary');
+  const close = button('Close recording', () => clear(true), 'secondary');
   const refreshEstimate = button('Refresh sound estimate', () => refreshClassification(), 'secondary');
   const retryEstimate = button('Retry sound classification', () => retryClassification(), 'secondary'); retryEstimate.hidden = true;
   element.append(title, status, audio, classification, classificationFeedback, close, refreshEstimate, retryEstimate);
-  let request, url, disposed = false, selected, classificationTimer, classificationRequest, classificationFailures = 0;
+  let request, url, disposed = false, selected, returnFocus, returnRegion, classificationTimer, classificationRequest, classificationFailures = 0;
   function stopClassification() { clearTimeout(classificationTimer); classificationRequest?.abort(); classificationRequest = null; }
   function renderClassification() {
     classification.replaceChildren(classificationNode(isGroup(selected) ? { status: 'not_requested' } : selected?.classification, timezone || selected?.location_snapshot?.timezone));
@@ -87,11 +88,19 @@ export function createRecordingPlayer(ctx, { timezone, urls = URL } = {}) {
     audio.pause?.(); audio.removeAttribute('src'); audio.load?.(); audio.hidden = true;
     if (url) { urls.revokeObjectURL(url); url = null; }
   }
-  function clear() { release(); element.hidden = true; status.textContent = ''; }
-  async function listen(recording) {
+  function clear(restoreFocus = false) {
+    release(); element.hidden = true; status.textContent = '';
+    if (restoreFocus && returnFocus) {
+      const target = returnFocus.isConnected ? returnFocus : [...document.querySelectorAll('[data-recording-id]')].find(control => control.getAttribute('data-recording-id') === returnFocus.getAttribute('data-recording-id') && !control.disabled);
+      (target || (returnRegion?.isConnected ? returnRegion : null))?.focus({ preventScroll: true });
+    }
+    returnFocus = null; returnRegion = null;
+  }
+  async function listen(recording, trigger = null, fallback = null) {
     if (disposed || ctx.signal?.aborted || (isGroup(recording) && !readyGroup(recording))) return;
-    release(); element.hidden = false;
-    element.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+    release(); element.hidden = false; returnFocus = trigger; returnRegion = fallback;
+    element.scrollIntoView?.({ behavior: globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
+    element.focus?.({ preventScroll: true });
     const own = new AbortController(); request = own;
     selected = recording; renderClassification(); scheduleClassification();
     title.textContent = `${sourcePrefix(recording)}${deviceLabel(recording, ctx.devices)} · ${formatTime(recording.captured_at || recording.measured_at, timezone || recording.location_snapshot?.timezone)} · ${isGroup(recording) ? groupLength(recording) : timingLabel(recording)} · ${calibrationLabel(recording)}`;
@@ -111,8 +120,9 @@ export function createRecordingPlayer(ctx, { timezone, urls = URL } = {}) {
   audio.addEventListener('error', () => {
     if (!disposed && url) status.textContent = 'This browser could not play the recording. Try another recording or browser; the saved original is unchanged.';
   });
-  function listenButton(recording) {
-    const control = button('Listen', () => listen(recording), 'secondary recording-listen');
+  function listenButton(recording, fallback = null) {
+    const control = button('Listen', () => listen(recording, control, fallback), 'secondary recording-listen');
+    control.setAttribute('data-recording-id', recordingId(recording) || '');
     control.setAttribute('aria-label', `Listen to ${deviceLabel(recording, ctx.devices)} recording captured ${formatTime(recording.captured_at || recording.measured_at, timezone || recording.location_snapshot?.timezone)}`);
     if (isGroup(recording) && !readyGroup(recording)) { control.disabled = true; control.title = 'Only complete continuous recordings are available to listen to.'; }
     if (!recordingId(recording)) { control.disabled = true; control.title = 'No saved recording is linked to this reading.'; }
@@ -141,6 +151,8 @@ export function createRecordingsBrowser(ctx, { locationId, timezone, devices = [
   device.setAttribute('aria-label', 'Recording device');
   const feedback = el('p', '', 'muted small'); feedback.setAttribute('role', 'status');
   const list = el('div', '', 'recordings-list'), footer = el('div', '', 'view-pagination'), count = el('span', '', 'muted');
+  list.tabIndex = -1; list.setAttribute('role', 'region'); list.setAttribute('aria-label', 'Saved recordings');
+  const listenControls = new Map();
   let offset = 0, total = 0, boundary, request, disposed = false, timer, failures = 0;
   const refresh = button('Refresh recordings', () => { offset = 0; boundary = null; return load(); }, 'secondary');
   const previous = button('← Previous recordings', () => { offset = Math.max(0, offset - PAGE_SIZE); if (offset === 0) boundary = null; return load(); }, 'secondary');
@@ -158,11 +170,12 @@ export function createRecordingsBrowser(ctx, { locationId, timezone, devices = [
     const query = new URLSearchParams({ location_id: locationId, limit: String(PAGE_SIZE), offset: String(offset), until: boundary, received_until: boundary });
     if (device.value) query.set('device_id', device.value);
     if (!automatic) feedback.textContent = 'Loading saved recordings…';
-    refresh.disabled = true; previous.disabled = true; next.disabled = true;
+    if (!automatic) { refresh.disabled = true; previous.disabled = true; next.disabled = true; }
     try {
       const result = await ctx.api(`/recordings?${query}`, { signal: own.signal });
       if (disposed || own.signal.aborted || request !== own) return;
-      total = result.total; failures = 0; list.replaceChildren();
+      const focusedId = [...listenControls].find(([, control]) => control === document.activeElement)?.[0];
+      total = result.total; failures = 0; list.replaceChildren(); listenControls.clear();
       for (const item of result.items) {
         const recording = { ...item, kind: 'recording_group' };
         const row = el('article', '', 'recording-row'), description = el('div', '', 'recording-description');
@@ -170,11 +183,16 @@ export function createRecordingsBrowser(ctx, { locationId, timezone, devices = [
         const missing = Array.isArray(recording.missing_sequences) ? recording.missing_sequences.length : 0;
         if (missing && recording.status !== 'collecting') description.append(el('small', `${missing} missing portion(s). Missing sound is not replaced with silence.`, 'muted'));
         if (recording.issues?.length) description.append(el('small', `Recording notes: ${recording.issues.map(issue => String(issue).replaceAll('_', ' ')).join('; ')}`, 'muted'));
-        row.append(description, player.listenButton(recording)); list.append(row);
+        const listen = player.listenButton(recording, list); listenControls.set(recording.id, listen);
+        row.append(description, listen); list.append(row);
       }
       if (!result.items.length) list.append(empty('No saved 10-second recordings yet', 'Recordings will appear here as your device sends continuous audio. Individual readings remain available in the history below.'));
       count.textContent = total ? `${offset + 1}–${Math.min(offset + result.items.length, total)} of ${total} recordings` : '0 recordings';
       feedback.textContent = '';
+      if (focusedId) {
+        const replacement = listenControls.get(focusedId);
+        (replacement && !replacement.disabled ? replacement : list).focus?.({ preventScroll: true });
+      }
     } catch (error) {
       if (!disposed && !own.signal.aborted && request === own) {
         failures++;

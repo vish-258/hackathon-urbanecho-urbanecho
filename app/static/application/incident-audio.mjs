@@ -15,7 +15,7 @@ export function createIncidentAudio(ctx, { incidentId, urls = URL } = {}) {
   const refresh = button('Refresh incident audio', () => load(), 'secondary');
   const generate = button('Generate incident audio', () => load(true), 'secondary');
   const listen = button('Listen to incident audio', () => loadAudio(), 'primary'); listen.disabled = true;
-  const close = button('Close incident audio', () => releaseAudio(), 'secondary'); close.hidden = true;
+  const close = button('Close incident audio', () => { releaseAudio(); (listen.disabled ? refresh : listen).focus({ preventScroll: true }); }, 'secondary'); close.hidden = true;
   actions.append(listen, refresh, generate, close);
   const playbackStatus = el('p', '', 'muted small'); playbackStatus.setAttribute('role', 'status');
   const playbackVersion = el('p', '', 'muted small');
@@ -23,6 +23,7 @@ export function createIncidentAudio(ctx, { incidentId, urls = URL } = {}) {
   audio.setAttribute('aria-label', 'Incident audio playback');
   element.append(metadata, feedback, actions, playbackStatus, playbackVersion, audio);
   let result, incident, request, audioRequest, timer, url, loadedRevision, disposed = false, failures = 0;
+  const disclosureState = new Map();
   const timezone = () => incident?.location_snapshot?.timezone || ctx.locations?.find(item => item.id === incident?.location_id)?.timezone || 'UTC';
   const revision = () => result?.audio?.revision || result?.revision;
   function controls() {
@@ -36,6 +37,12 @@ export function createIncidentAudio(ctx, { incidentId, urls = URL } = {}) {
     close.hidden = !url && !audioRequest;
   }
   function render() {
+    let focusedDisclosure;
+    for (const details of metadata.querySelectorAll('details')) {
+      const summary = details.querySelector('summary');
+      disclosureState.set(summary.textContent, details.open);
+      if (summary === document.activeElement) focusedDisclosure = summary.textContent;
+    }
     const saved = result?.audio || {}, provisional = result?.provisional;
     let label = 'Waiting for incident processing';
     if (result?.status === 'failed') label = 'Incident audio processing failed';
@@ -73,7 +80,15 @@ export function createIncidentAudio(ctx, { incidentId, urls = URL } = {}) {
       if (result.classification.classified_at) nodes.push(el('p', `Sound estimate saved: ${formatTime(result.classification.classified_at, timezone())}`, 'muted small'));
     }
     if (result?.generated_at) nodes.push(el('p', `Audio last generated: ${formatTime(result.generated_at, timezone())}`, 'muted small'));
-    metadata.replaceChildren(...nodes); controls();
+    metadata.replaceChildren(...nodes);
+    let restoredFocus = false;
+    for (const details of metadata.querySelectorAll('details')) {
+      const summary = details.querySelector('summary');
+      details.open = disclosureState.get(summary.textContent) || false;
+      if (summary.textContent === focusedDisclosure) { summary.focus({ preventScroll: true }); restoredFocus = true; }
+    }
+    if (focusedDisclosure && !restoredFocus) element.focus({ preventScroll: true });
+    controls();
   }
   function schedule() {
     clearTimeout(timer);

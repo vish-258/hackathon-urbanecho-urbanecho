@@ -71,9 +71,11 @@ class Element {
   replaceChildren(...children) { this._text = ''; this.children = []; this.append(...children); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   removeAttribute(name) { delete this.attributes[name]; if (name === 'src') this.src = ''; }
+  focus() { document.activeElement = this; }
   addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); }
   get lastChild() { return this.children.at(-1); }
   all() { return this.children.flatMap(child => child instanceof Element ? [child, ...child.all()] : []); }
+  querySelectorAll(selector) { return this.all().filter(node => node.tag === selector); }
   querySelector(selector) {
     const [first, ...rest] = selector.split(' '), [tag, className] = first.split('.');
     const found = this.all().find(node => (!tag || node.tag === tag) && (!className || node.className.split(' ').includes(className)));
@@ -116,6 +118,36 @@ function fixture() {
   };
   return { ctx, requests, emit: event => { const changes = batch(event); for (const handler of listeners) handler(changes); }, listeners, controller };
 }
+
+test('incident history keeps horizontal position and the focused record through live updates', async t => {
+  useDOM(t);
+  const oldLocation = globalThis.location;
+  globalThis.location = { hash: '#incidents' };
+  t.after(() => { globalThis.location = oldLocation; });
+  const { ctx, emit } = fixture();
+  const record = id => ({ id, location_id: 'selected', device_id: 'device-1', status: 'active', started_at: '2026-10-10T00:00:00Z', threshold_type: 'dbfs_rms', threshold_value: -30, latest_db: -25, peak_db: -25 });
+  let items = [record('first')];
+  ctx.api = async () => ({ items, total: items.length });
+  const root = new Element('main');
+  const cleanup = await mountView(root, { page: 'incidents' }, ctx);
+  t.after(cleanup);
+  const original = root.querySelector('.view-table-wrap');
+  assert.ok(original);
+  original.scrollLeft = 340;
+  original.querySelectorAll('a').at(-1).focus();
+  const refresh = async () => { emit({ event_type: 'incident.updated', location_id: 'selected', incident_id: 'first' }); t.mock.timers.tick(1100); await settle(); };
+  items = [record('newer'), record('first')];
+  await refresh();
+  assert.equal(root.querySelector('.view-table-wrap').scrollLeft, 340);
+  assert.equal(document.activeElement.href, '#/incident/first');
+  assert.equal(document.activeElement.textContent, 'View incident');
+  items = [record('newer')];
+  await refresh();
+  assert.equal(document.activeElement, root.querySelector('.view-table-wrap'));
+  const search = root.querySelector('input'); search.focus();
+  await refresh();
+  assert.equal(document.activeElement, search, 'a live update does not steal filter focus');
+});
 
 test('actual location view refreshes only its latest page and relevant panels', async t => {
   useDOM(t);
