@@ -14,10 +14,11 @@ from scripts import serve_railway as runtime
 
 def test_nondefault_port_and_bounded_api_shutdown():
     port = runtime.parse_port({"PORT": "19387"})
-    api, worker = runtime.service_commands(port)
+    api, worker, classifier = runtime.service_commands(port)
     assert api[1][api[1].index("--port") + 1] == "19387"
     assert api[1][api[1].index("--timeout-graceful-shutdown") + 1] == "10"
     assert worker[1][-2:] == ["-m", "app.worker"]
+    assert classifier == ("classifier", [sys.executable, "-m", "app.classification_worker"])
     assert runtime.parse_port({}) == 8000
 
 
@@ -110,7 +111,8 @@ def test_children_do_not_inherit_migration_credentials():
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
-def test_any_unexpected_child_exit_stops_sibling(exit_code, monkeypatch):
+@pytest.mark.parametrize("exiting_service", ["api", "worker", "classifier"])
+def test_any_unexpected_child_exit_stops_siblings(exit_code, exiting_service, monkeypatch):
     real_popen = subprocess.Popen
     processes = []
 
@@ -121,12 +123,12 @@ def test_any_unexpected_child_exit_stops_sibling(exit_code, monkeypatch):
         return process
 
     monkeypatch.setattr(runtime.subprocess, "Popen", recording_popen)
-    result = runtime.run_services([
-        ("api", [sys.executable, "-c", "import time; time.sleep(30)"]),
-        ("worker", [sys.executable, "-c", f"raise SystemExit({exit_code})"]),
-    ], os.environ, shutdown_seconds=0.5, poll_seconds=0.01)
+    commands = [(name, [sys.executable, "-c", f"raise SystemExit({exit_code})"
+                       if name == exiting_service else "import time; time.sleep(30)"])
+                for name in ("api", "worker", "classifier")]
+    result = runtime.run_services(commands, os.environ, shutdown_seconds=0.5, poll_seconds=0.01)
     assert result == 1
-    assert len(processes) == 2
+    assert len(processes) == 3
     assert all(process.poll() is not None for process in processes)
 
 
@@ -161,7 +163,7 @@ def test_shutdown_signal_is_forwarded_and_handlers_restored(signum, monkeypatch)
         nonlocal timer
         process = real_popen(*args, **kwargs)
         processes.append(process)
-        if len(processes) == 2:
+        if len(processes) == 3:
             # The supervisor has installed its signal handlers before spawning.
             timer = threading.Timer(0.1, lambda: os.kill(os.getpid(), signum))
             timer.start()
@@ -169,7 +171,7 @@ def test_shutdown_signal_is_forwarded_and_handlers_restored(signum, monkeypatch)
 
     monkeypatch.setattr(runtime.subprocess, "Popen", recording_popen)
     command = [sys.executable, "-c", "import time; time.sleep(30)"]
-    assert runtime.run_services([("api", command), ("worker", command)], os.environ,
+    assert runtime.run_services([("api", command), ("worker", command), ("classifier", command)], os.environ,
                                 shutdown_seconds=0.5, poll_seconds=0.01) == 0
     timer.join()
     assert all(process.poll() is not None for process in processes)

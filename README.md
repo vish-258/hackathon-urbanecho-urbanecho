@@ -130,7 +130,7 @@ docker compose up -d api worker classifier
 
 Use the same Compose override files as your current installation (including `compose.amd64.yaml` on Apple Silicon). If the hardware listener is enabled, recreate `device-api` with its existing private listener environment and `compose.hardware.yaml` too. The additive incident-analysis migration follows `0007_recording_classification`; migrations do not change firmware on physical boards.
 
-`CLASSIFICATION_ENABLED=false` disables classification while leaving recording and noise detection operational. Other bounded queue/retry settings are listed in `.env.example`. The normal Docker Compose setup starts the classifier automatically with at most one CPU and 1 GB RAM; its original-audio volume is read-only. Host-only installations need `requirements-classification.txt`, `python -m scripts.fetch_yamnet --output PATH`, `CLASSIFICATION_MODEL_PATH=PATH`, and a separate `python -m app.classification_worker` process. Older single-process/cloud launchers require that extra worker and model setup; this release is verified with local Compose.
+`CLASSIFICATION_ENABLED=false` disables classification while leaving recording and noise detection operational. Other bounded queue/retry settings are listed in `.env.example`. The normal Docker Compose setup starts the classifier automatically with at most one CPU and 1 GB RAM; its original-audio volume is read-only. Host-only installations need `requirements-classification.txt`, `python -m scripts.fetch_yamnet --output PATH`, `CLASSIFICATION_MODEL_PATH=PATH`, and a separate `python -m app.classification_worker` process. Railway's `deploy/railway/Dockerfile.application` includes the model and all runtime dependencies; its launcher supervises the API, measurement worker and classifier together on one persistent audio volume. See [RAILWAY.md](RAILWAY.md) for deployment status and checks.
 
 Administrators can read `GET /incidents/{id}/analysis`, request recalculation with `POST /incidents/{id}/analysis`, and listen through the authenticated `GET /incidents/{id}/audio/file?revision=...`. A stale revision returns 409 rather than silently substituting different audio. `GET /classification/status` reports worker readiness. `CLASSIFICATION_SCOPE=incidents` is the default; `recordings` retains the older per-clip mode for compatibility. In incident mode, per-recording POST classification requests are rejected and unclassified ordinary clips report `not_requested`, not a permanently pending estimate. Context, refresh and settle controls are in `.env.example`.
 
@@ -190,7 +190,7 @@ Recordings below the threshold, unusable recordings accepted as valid WAV, histo
 
 The application runs locally at **http://localhost:8000/app**. The ngrok tunnel and its local setup were removed on 9 October 2026. Docker exposes the application only on this Mac at `127.0.0.1:8000`; keep Docker running.
 
-For Railway, see [RAILWAY.md](RAILWAY.md). The deployment package has passed local checks; the prepared Railway project is currently blocked by a workspace account restriction and is **not live**.
+For Railway, see [RAILWAY.md](RAILWAY.md). A fresh deployment attempt on **10 October 2026** confirmed that the workspace account restriction still blocks deployment and requires a paid-plan upgrade. The prepared project is **not live**; no public application URL is verified.
 
 ## Simulator and physical device integration
 

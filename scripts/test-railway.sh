@@ -34,8 +34,10 @@ compose up --build -d --wait app
 # API readiness checks storage, PostGIS and schema; inspect process identities
 # without ever printing environment values or credentials.
 compose exec -T --user 10001:10001 app python - <<'PY'
-import json, os, urllib.error, urllib.request
+import json, os, time, urllib.error, urllib.request
 from pathlib import Path
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from app.config import get_settings
 from sqlalchemy import create_engine, text
 base = 'http://localhost:8087'
@@ -43,11 +45,20 @@ with urllib.request.urlopen(base + '/health/ready', timeout=5) as response:
     assert response.status == 200
 with urllib.request.urlopen(base + '/demo', timeout=5) as response:
     assert response.status == 200
+with urllib.request.urlopen(base + '/app', timeout=5) as response:
+    assert response.status == 200
 try:
     urllib.request.urlopen(base + '/devices', timeout=5)
     raise AssertionError('Unauthenticated device listing was accepted')
 except urllib.error.HTTPError as error:
     assert error.code == 401
+try:
+    request = urllib.request.Request(base + '/app/session', data=b'{}',
+        headers={'Content-Type': 'application/json', 'X-Soundwatch-Local': '1', 'Origin': base})
+    urllib.request.urlopen(request, timeout=5)
+    raise AssertionError('Public deployment accepted an automatic local session')
+except urllib.error.HTTPError as error:
+    assert error.code == 403
 commands = {}
 for entry in Path('/proc').iterdir():
     if not entry.name.isdigit():
@@ -56,7 +67,7 @@ for entry in Path('/proc').iterdir():
         command = (entry / 'cmdline').read_bytes().split(b'\0')
     except (FileNotFoundError, PermissionError):
         continue
-    for module in (b'scripts.serve_railway', b'app.worker', b'uvicorn'):
+    for module in (b'scripts.serve_railway', b'app.worker', b'app.classification_worker', b'uvicorn'):
         if module in command:
             status = (entry / 'status').read_text().splitlines()
             assert next(line for line in status if line.startswith('Uid:')).split()[1:] == ['10001'] * 4
@@ -66,25 +77,50 @@ for entry in Path('/proc').iterdir():
                 names = {item.split(b'=', 1)[0] for item in environment}
                 assert not names.intersection({b'MIGRATION_DATABASE_URL', b'POSTGRES_USER', b'POSTGRES_PASSWORD'})
             commands[module] = entry.name
-assert set(commands) == {b'scripts.serve_railway', b'app.worker', b'uvicorn'}
+assert set(commands) == {b'scripts.serve_railway', b'app.worker', b'app.classification_worker', b'uvicorn'}
 assert Path('/data/audio').stat().st_uid == 10001
 settings = get_settings()
+assert settings.local_browser_access is False
 with create_engine(settings.database_url).connect() as connection:
-    assert connection.execute(text('select version_num from alembic_version')).scalar_one() == '0003_legacy_audio_guard'
+    expected_head = ScriptDirectory.from_config(Config('alembic.ini')).get_current_head()
+    assert connection.execute(text('select version_num from alembic_version')).scalar_one() == expected_head
     assert connection.execute(text('select postgis_version()')).scalar_one().startswith('3.5')
     privileged = connection.execute(text('select rolsuper or rolcreatedb or rolcreaterole or rolreplication from pg_roles where rolname = current_user')).scalar_one()
     assert privileged is False
-print('PASS: dynamic port, API readiness, demo, authentication, schema, PostGIS, restricted database role, volume ownership, process identities and child credential filtering.')
+for _ in range(120):
+    request = urllib.request.Request(base + '/classification/status',
+        headers={'Authorization': 'Bearer ' + os.environ['ADMIN_TOKEN']})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        status = json.load(response)
+    if status['worker_status'] == 'ready':
+        assert status['classification_scope'] == 'incidents' and status['enabled'] is True
+        break
+    time.sleep(.5)
+else:
+    raise AssertionError('Classifier did not initialize its verified model')
+print('PASS: dynamic port, application, authentication, disabled local access, latest schema, PostGIS, restricted database role, volume ownership, all process identities, child credential filtering and classifier model readiness.')
 PY
 
 # Existing fixture exercises actual HTTP uploads, worker processing and incidents.
 compose exec -T --user 10001:10001 app python - <<'PY'
 import importlib.util
+import json
+import time
 spec = importlib.util.spec_from_file_location('persistence_live', '/app/scripts/persistence-live.py')
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 fixture.BASE = 'http://localhost:8087'
 fixture.prepare()
+incident_id = json.loads(fixture.PATH.read_text())['incident_id']
+for _ in range(120):
+    analysis = fixture.request(fixture.BASE, fixture.ADMIN, '/incidents/' + incident_id + '/analysis')
+    if analysis['status'] == 'completed' and analysis['audio']['available']:
+        assert analysis['classification']['primary_category'] is not None
+        break
+    time.sleep(.5)
+else:
+    raise AssertionError('Classifier did not produce incident playback and a saved sound estimate')
+print('PASS: real incident audio and model classification complete in the combined runtime.')
 PY
 
 # Remove and recreate both services while preserving ONLY this project's volumes.
@@ -99,7 +135,8 @@ fixture.BASE = 'http://localhost:8087'
 fixture.verify()
 PY
 
-# A stopped worker must stop the API too, so the platform can restart the service.
+# A stopped classifier must stop the API and measurement worker too, so the
+# platform can restart every process sharing the one persistent volume.
 APP_CONTAINER=$(compose ps -q app)
 compose exec -T app python - <<'PY'
 import os, signal
@@ -110,11 +147,11 @@ for entry in Path('/proc').iterdir():
             command = (entry / 'cmdline').read_bytes().split(b'\0')
         except (FileNotFoundError, PermissionError):
             continue
-        if b'app.worker' in command:
+        if b'app.classification_worker' in command:
             os.kill(int(entry.name), signal.SIGTERM)
             break
 else:
-    raise AssertionError('Worker was not running')
+    raise AssertionError('Classifier was not running')
 PY
 TEST_EXIT=$(python3 - "$APP_CONTAINER" <<'PY'
 import subprocess, sys
@@ -122,8 +159,8 @@ result = subprocess.run(['docker', 'wait', sys.argv[1]], check=True, capture_out
 print(result.stdout.strip())
 PY
 )
-test "$TEST_EXIT" = 1 || { echo 'Unexpected worker exit did not fail the combined service.' >&2; exit 1; }
-echo 'PASS: an unexpected worker exit stops the combined service with status 1.'
+test "$TEST_EXIT" = 1 || { echo 'Unexpected classifier exit did not fail the combined service.' >&2; exit 1; }
+echo 'PASS: an unexpected classifier exit stops the combined service with status 1.'
 
 # Without the mounted audio volume, startup must fail before accepting traffic.
 if docker run --rm --user 0:0 \

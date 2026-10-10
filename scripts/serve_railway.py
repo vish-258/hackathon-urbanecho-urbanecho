@@ -1,4 +1,4 @@
-"""Run the API and worker together on Railway's single persistent audio volume.
+"""Run API, measurement worker and classifier on one persistent audio volume.
 
 Schema migrations run separately before deployment. This launcher deliberately
 does not import the application or print environment values.
@@ -91,7 +91,7 @@ def prepare_audio_root(audio_root: Path) -> None:
 
 
 def child_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Keep migration credentials out of both long-running child processes."""
+    """Keep migration credentials out of every long-running child process."""
     return {key: value for key, value in environment.items() if key not in PRIVILEGED_VARIABLES}
 
 
@@ -100,6 +100,7 @@ def service_commands(port: int) -> list[tuple[str, list[str]]]:
         ("api", [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0",
                  "--port", str(port), "--timeout-graceful-shutdown", "10"]),
         ("worker", [sys.executable, "-m", "app.worker"]),
+        ("classifier", [sys.executable, "-m", "app.classification_worker"]),
     ]
 
 
@@ -159,10 +160,10 @@ def run_services(
             for name, child in children:
                 code = child.poll()
                 if code is not None:
-                    LOGGER.error("%s exited unexpectedly with status %s; stopping both services", name, code)
+                    LOGGER.error("%s exited unexpectedly with status %s; stopping all services", name, code)
                     return 1
             stopping.wait(poll_seconds)
-        LOGGER.info("Shutdown requested; stopping both services")
+        LOGGER.info("Shutdown requested; stopping all services")
         return 0
     except OSError as error:
         # Exception text can include command/environment details; log only type.

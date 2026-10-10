@@ -1,6 +1,14 @@
 # Railway deployment
 
-## Current status — 9 October 2026
+## Runtime update — 10 October 2026
+
+**Cloud deployment remains blocked.** A fresh database deployment attempt on 10 October was rejected because Railway restricted the workspace after detecting unusual activity and requires a paid-plan upgrade to lift the restriction. No public application URL is verified. The existing project and volumes are retained.
+
+The deployment package now includes the incident classifier and verified YAMNet model as well as the API and measurement worker. Use `deploy/railway/Dockerfile.application` for the application service; the root Dockerfile deliberately remains the lightweight local API image. Ten-second recording groups and daily reports run within the measurement worker. This packaging update alone does not establish a successful cloud deployment; complete the checks below before sharing a public URL.
+
+Public `/app` access uses the existing administrator-token sign-in. Set `LOCAL_BROWSER_ACCESS=false`; automatic loopback sessions must never be enabled behind Railway's proxy. Keep credentials out of URLs and submission forms.
+
+## Earlier deployment attempt — 9 October 2026
 
 The deployment package passed local verification. **The Railway backend is not live.** Railway blocked the first database upload and displayed an account restriction requiring a paid-plan upgrade. There is no working public application URL yet, and no cloud end-to-end or persistence result is claimed.
 
@@ -19,17 +27,19 @@ Fresh deployment credentials are configured in Railway service variables; they a
 
 ## Layout
 
-One application service runs the API and audio worker together through `python -m scripts.serve_railway`. Both use the same mounted audio directory. A separate private database service runs PostgreSQL 17/PostGIS 3.5. Each service needs its own persistent volume. Railway does not run this project's local Docker Compose stack directly, and a volume cannot be shared between two services. See [Railway volumes](https://docs.railway.com/volumes/reference).
+One application service runs the API, measurement worker and incident classifier together through `python -m scripts.serve_railway`. They use the same mounted audio directory; classification reads originals without changing them. A separate private database service runs PostgreSQL 17/PostGIS 3.5. Each service needs its own persistent volume. Railway does not run this project's local Docker Compose stack directly, and a volume cannot be shared between two services. See [Railway volumes](https://docs.railway.com/volumes/reference).
 
 `deploy/railway/Dockerfile.postgis` packages the existing database initialization script. It creates the restricted application role and PostGIS extension. It stores PostgreSQL files below the mount root at `/var/lib/postgresql/data/pgdata`.
 
-The application launcher validates `PORT`, requires a real mounted audio volume on Railway, changes only the mount root's ownership, and permanently drops to UID/GID 10001 before starting API/worker. An unexpected exit of either child stops both and returns failure so Railway can restart the service. SIGTERM/SIGINT trigger bounded cleanup. Migrations run separately before deployment.
+The application launcher validates `PORT`, requires a real mounted audio volume on Railway, changes only the mount root's ownership, and permanently drops to UID/GID 10001 before starting its three child processes. An unexpected exit of any child stops all children and returns failure so Railway can restart the service. SIGTERM/SIGINT trigger bounded cleanup. Migrations run separately before deployment. The combined service needs enough memory for the Python API, workers and model runtime; the local classifier alone has a 1 GB limit.
 
-## Configured service settings
+## Required service settings
+
+The application Dockerfile below supersedes the setting prepared on 9 October. Reapply it to the existing service before uploading the current source.
 
 | Setting | `noise-postgis` | `noise-backend` |
 |---|---|---|
-| Dockerfile, from source root | `deploy/railway/Dockerfile.postgis` | `Dockerfile` |
+| Dockerfile, from source root | `deploy/railway/Dockerfile.postgis` | `deploy/railway/Dockerfile.application` |
 | Start command | Image default | `python -m scripts.serve_railway` |
 | Pre-deploy command | None | `alembic upgrade head` |
 | Pre-deploy timeout | — | 300 seconds |
@@ -40,7 +50,7 @@ The application launcher validates `PORT`, requires a real mounted audio volume 
 | Draining period | 30 seconds | 30 seconds |
 | Public networking | None | Generate HTTPS domain targeting port 8000 after deploy |
 
-Settings were applied explicitly through Railway's API. Do not add a legacy `railway.toml`/`railway.json` to this new project. Current [configuration guidance](https://docs.railway.com/infrastructure-as-code) uses the new infrastructure-as-code workflow when configuration files are desired.
+The original settings were applied explicitly through Railway's API. Do not add a legacy `railway.toml`/`railway.json` to this project. See [configuration guidance](https://docs.railway.com/infrastructure-as-code) when configuration files are desired.
 
 Database variables:
 
@@ -57,6 +67,7 @@ PGDATA=/var/lib/postgresql/data/pgdata
 Application variables:
 
 ```text
+RAILWAY_DOCKERFILE_PATH=deploy/railway/Dockerfile.application
 DB_HOST=${{noise-postgis.RAILWAY_PRIVATE_DOMAIN}}
 DB_PORT=5432
 POSTGRES_DB=${{noise-postgis.POSTGRES_DB}}
@@ -70,9 +81,13 @@ AUDIO_ROOT=/data/audio
 PORT=8000
 DB_RETRY_ATTEMPTS=15
 DB_RETRY_DELAY_SECONDS=2
+LOCAL_BROWSER_ACCESS=false
+CLASSIFICATION_ENABLED=true
+CLASSIFICATION_SCOPE=incidents
+CLASSIFICATION_MODEL_PATH=/opt/urbanecho-models/yamnet.tflite
 ```
 
-Railway supplies `RAILWAY_ENVIRONMENT_ID` and `RAILWAY_VOLUME_MOUNT_PATH` when its volume is attached; the latter must equal `/data/audio`. Root is used only for storage initialization, addressing [Railway's volume ownership behavior](https://docs.railway.com/volumes). API and worker run without root privileges.
+Railway supplies `RAILWAY_ENVIRONMENT_ID` and `RAILWAY_VOLUME_MOUNT_PATH` when its volume is attached; the latter must equal `/data/audio`. Root is used only for storage initialization, addressing [Railway's volume ownership behavior](https://docs.railway.com/volumes). API, worker and classifier run without root privileges.
 
 The privileged migration password remains a Railway service variable because pre-deploy needs it. The launcher removes `POSTGRES_PASSWORD`, `POSTGRES_USER`, and `MIGRATION_DATABASE_URL` from child environments; this is not isolation from the service configuration or its supervisor. The normal app connection uses the restricted role. [Pre-deploy commands](https://docs.railway.com/deployments/pre-deploy-command) have private-network access but no mounted audio volume.
 
@@ -100,7 +115,7 @@ railway up . --path-as-root \
 
 Wait for successful pre-deploy migrations and readiness, then generate the application HTTPS domain with target port 8000. Confirm both services/volumes occupy the same region and that the database has no public domain or TCP proxy. Upload only this source directory: `.railwayignore` excludes credentials, recordings, backups and local working files. See [CLI upload behavior](https://docs.railway.com/cli/up).
 
-Before reporting the cloud installation as working, verify HTTPS readiness, protected routes rejecting unauthenticated requests, `/demo`, a clearly labelled synthetic WAV upload processed by the worker, incident events over authenticated SSE/reconnect, and database/audio/event persistence after one controlled restart. Cloud networking, HTTPS, Railway volume permissions, worker survival and account resource limits remain unverified until those checks pass.
+Before reporting the cloud installation as working, verify HTTPS readiness at the latest migration, protected routes rejecting unauthenticated requests, disabled automatic local sessions, `/app` sign-in, a clearly labelled synthetic WAV upload processed by the worker, incident events over authenticated SSE/reconnect, classification model readiness, playable incident audio with a saved sound estimate, and database/audio/event persistence after one controlled restart. Cloud networking, HTTPS, Railway volume permissions, worker survival and account resource limits remain unverified until those checks pass. Physical devices need cloud endpoint settings and their own cloud registration; deploying the backend does not redirect existing boards or copy local recordings.
 
 The two currently allocated volumes are 500 MB each. Select suitable capacity, retention and backup arrangements before sustained real-device recording. Do not remove volumes to resolve a deployment failure.
 
@@ -110,6 +125,8 @@ The two currently allocated volumes are 500 MB each. Select suitable capacity, r
 ./scripts/test-railway.sh
 ```
 
-This passed with a separate disposable Compose project, fresh private credentials, the custom PostGIS image, a root-owned audio volume, dynamic port 8087, and the combined launcher. It confirmed migration `0003_legacy_audio_guard`, restricted database privileges, real upload/processing/incident behavior, original-audio checksums and event/recovery persistence after container recreation, privilege dropping, child credential filtering, failure supervision, and refusal to start without mounted audio storage.
+The current harness builds the full application image and checks all three processes, the current Alembic head, disabled local access, classifier model readiness and saved incident audio/classification. It retains the original upload, restart/persistence, privilege and storage checks. Its database and audio volumes are disposable and separate from the development installation.
 
-All 27 launcher tests also passed. The ordinary local development stack and its volumes were retained. See `VERIFICATION.md` for the broader backend's earlier verification evidence.
+**10 October 2026:** all 31 launcher tests and the full isolated Railway harness passed. The combined runtime verified authentication, current schema, restricted database privileges, all process identities, model readiness, saved incident audio/classification, original-audio and incident/event persistence after recreation, classifier failure supervision, and rejection of missing persistent storage. These are local packaging results; the Railway account restriction still prevents cloud deployment and no public URL is verified.
+
+Historical result, 9 October: the earlier harness passed with a separate disposable Compose project, fresh private credentials, the custom PostGIS image, a root-owned audio volume, dynamic port 8087, and the two-process launcher. It confirmed migration `0003_legacy_audio_guard`, restricted database privileges, real upload/processing/incident behavior, original-audio checksums and event/recovery persistence after container recreation, privilege dropping, child credential filtering, failure supervision, and refusal to start without mounted audio storage. All 27 launcher tests also passed then. Those historical results do not validate the newer classifier package. See `VERIFICATION.md` for the broader backend's earlier verification evidence.

@@ -26,6 +26,7 @@ services:
     image: noise-monitor:railway-test
     build:
       context: ../..
+      dockerfile: deploy/railway/Dockerfile.application
     command: ["alembic", "upgrade", "head"]
     environment:
       DB_HOST: db
@@ -42,6 +43,7 @@ services:
     image: noise-monitor:railway-test
     build:
       context: ../..
+      dockerfile: deploy/railway/Dockerfile.application
     user: "0:0"
     command: ["python", "-m", "scripts.serve_railway"]
     stop_grace_period: 25s
@@ -52,7 +54,7 @@ services:
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       # Railway's pre-deploy command shares service configuration. The launcher
-      # deliberately removes these privileged variables from the API and worker.
+      # deliberately removes these privileged variables from all child services.
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       AUDIO_ROOT: /data/audio
@@ -60,6 +62,11 @@ services:
       RAILWAY_ENVIRONMENT_ID: isolated-verification
       RAILWAY_VOLUME_MOUNT_PATH: /data/audio
       WORKER_POLL_SECONDS: "0.1"
+      LOCAL_BROWSER_ACCESS: "false"
+      CLASSIFICATION_ENABLED: "true"
+      CLASSIFICATION_SCOPE: incidents
+      CLASSIFICATION_MODEL_PATH: /opt/urbanecho-models/yamnet.tflite
+      CLASSIFICATION_POLL_SECONDS: "0.1"
     volumes:
       - type: volume
         source: original_audio
