@@ -2,11 +2,11 @@
 
 ## Project overview
 
-UrbanEcho is a working **local prototype for residential community management**: it brings monitoring locations, sound readings, excessive-noise incidents and daily coverage reports into one application. The proposed use is to help community staff investigate shared-space noise and review patterns; a residential customer pilot and its benefits have not yet been validated.
+UrbanEcho is a working **prototype for residential community management**, available locally and as a hosted demo: it brings monitoring locations, sound readings, excessive-noise incidents and daily coverage reports into one application. The proposed use is to help community staff investigate shared-space noise and review patterns; a residential customer pilot and its benefits have not yet been validated.
 
 **Problem:** community staff often investigate noise complaints without a consistent record of where and when the noise occurred. **Proposed solution:** connect identified microphones to mapped locations, retain their readings, flag excessive noise and provide a daily review. **Built so far:** a runnable backend, browser application, database, audio-processing worker, repeatable three-location simulator and device firmware/configuration templates.
 
-**Two ESP32 devices have supplied real PCM16 recordings through the local HTTPS listener.** Original audio is stored as well as numerical readings. YAMNet now provides saved, fallible sound-source estimates; calibrated acoustic accuracy and regulatory compliance have not been established. The browser application runs locally on this Mac, with separate authenticated access for devices on its local network.
+**Two ESP32 devices have supplied real PCM16 recordings through the local HTTPS listener.** Original audio is stored as well as numerical readings. YAMNet now provides saved, fallible sound-source estimates; calibrated acoustic accuracy and regulatory compliance have not been established. The local installation retains those recordings. The separate [hosted application](https://urban-echo-uz15.onrender.com/app) uses a fresh cloud dataset with clearly labelled simulated verification data.
 
 ## Key features
 
@@ -15,7 +15,7 @@ UrbanEcho is a working **local prototype for residential community management**:
 | Device and geographic mapping | Register each Arduino board using its automatic `ESP-<MAC>` device ID against a location, coordinates and timezone; preserve earlier assignments when a device moves. |
 | Audio capture and storage | Authenticated PCM16 uploads from the adapted Arduino sender, existing PCM24 WAV uploads, durable originals and duplicate-safe retries. |
 | Sound-level processing | Saved numerical levels with measurement definitions, quality and calibration status; uncalibrated digital levels remain distinct from sound-pressure levels. |
-| Incident audio and classification | One playable recording covers each incident and its available context. Local YAMNet saves Traffic, Horn, Siren, Construction, Music, Animal, Voice or Other estimates for the incident. |
+| Incident audio and classification | One playable recording covers each incident and its available context. Server-side YAMNet saves Traffic, Horn, Siren, Construction, Music, Animal, Voice or Other estimates for the incident. |
 | Immediate noise alerts | Per-location thresholds, sustained incident updates, configured recovery, saved event history and live homepage updates. |
 | Web application | Map, latest readings, location history/charts, stale-device status, incident details and management controls. |
 | Daily reports | Manual recalculation and scheduled previous-local-day processing, energy/duration averages, incident counts, coverage and clear partial/no-data states. |
@@ -38,7 +38,11 @@ Prices, adoption targets, savings and proposed revenue remain planning assumptio
 
 ## Deployment and first run
 
-**Current deployment: local Docker, not a hosted public service.** A GitHub repository shares the source; cloning it does not include the original installation's database, audio or private settings. A new checkout starts with empty data and can create its own labelled demonstration.
+**Hosted demo: [UrbanEcho](https://urban-echo-uz15.onrender.com/app)** — live on free Render with a separate Supabase database and private audio storage, verified on 10 October 2026. Sign in with the deployment's private `ADMIN_TOKEN`; credentials are not included in the public repository or URL. The free service sleeps when idle, so the first visit can take about a minute to wake it. See [Render deployment and verification](RENDER.md) for limits and setup.
+
+The hosted smoke check verified authenticated uploads, three processed recordings, byte-exact original downloads, incident recovery state and actual model classification with playable incident audio. Its location/device are labelled **SIMULATED**; local recordings and device credentials were not copied to the cloud.
+
+**Local Docker remains supported.** Cloning the repository does not include either installation's database, audio or private settings. A new checkout starts with empty data and can create its own labelled demonstration.
 
 For macOS or Linux, install Docker with Compose v2 and Python 3, then run from the repository root. Windows teammates should use a Linux environment such as WSL for the simulator scripts:
 
@@ -90,7 +94,7 @@ The detailed implementation and operating reference follows. The [Step 6 report]
 
 ## Monitoring application
 
-Open **http://localhost:8000/app** for the complete monitoring workspace: geographic map, location charts, incident history, live alerts, daily reports, and management. It opens automatically on this Mac—no administrator token or sign-in is needed in the application. See [APPLICATION.md](APPLICATION.md) for setup, verified behavior, and limitations, and [the product walkthrough](docs/step7/DEMO-WALKTHROUGH.md) for the preserving three-location demonstration. Daily reports calculate and save results from the existing measurements.
+Open the [hosted app](https://urban-echo-uz15.onrender.com/app) with its private administrator token, or **http://localhost:8000/app** for the local monitoring workspace: geographic map, location charts, incident history, live alerts, daily reports, and management. The local app opens automatically on this Mac using its loopback-only session. See [APPLICATION.md](APPLICATION.md) for local setup, verified behavior, and limitations, and [the product walkthrough](docs/step7/DEMO-WALKTHROUGH.md) for the preserving three-location demonstration. Daily reports calculate and save results from the existing measurements.
 
 ### Listen to saved recordings
 
@@ -190,7 +194,7 @@ Recordings below the threshold, unusable recordings accepted as valid WAV, histo
 
 The application runs locally at **http://localhost:8000/app**. The ngrok tunnel and its local setup were removed on 9 October 2026. Docker exposes the application only on this Mac at `127.0.0.1:8000`; keep Docker running.
 
-For independent free hosting, see [RENDER.md](RENDER.md). Render runs the application and its workers; Supabase stores the database and immutable originals in a private bucket. Uploads are accepted only after the original is stored remotely, and playback restores verified originals when the server's temporary cache is empty. The free service sleeps when idle, pausing background processing until it wakes. Cloud deployment is being configured; no public application URL is verified yet.
+The [independent hosted app](https://urban-echo-uz15.onrender.com/app) is live; see [RENDER.md](RENDER.md) for setup and verification. Render runs the application and its workers; Supabase stores the database and immutable originals in a private bucket. Uploads are accepted only after the original is stored remotely, and playback restores verified originals when the server's temporary cache is empty. The free service sleeps when idle, pausing background processing until it wakes.
 
 The earlier Railway deployment remains blocked by a paid-plan account requirement. See [RAILWAY.md](RAILWAY.md) for that attempt's status.
 
