@@ -252,7 +252,7 @@ def process_claim(claim, settings=None, *, infer=None):
             chunk = session.get(AudioChunk, claim.audio_chunk_id)
             if chunk is None:
                 raise FileNotFoundError()
-            path = resolve_audio_path(chunk.file_path, settings)
+            path = resolve_audio_path(chunk.file_path, settings, checksum=chunk.checksum)
             expected_hash = chunk.checksum
         # No database/event/device lock is held during file reads or inference.
         with path.open("rb") as source:

@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: urban-echo
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: main
+    dockerfilePath: ./deploy/render/Dockerfile
+    dockerContext: .
+    autoDeployTrigger: "off"
+    healthCheckPath: /health/ready
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: LOCAL_BROWSER_ACCESS
+        value: "false"
+      - key: AUDIO_STORAGE_BACKEND
+        value: supabase
+      - key: AUDIO_ROOT
+        value: /tmp/urbanecho-audio-cache
+      - key: MIGRATION_SEARCH_PATH
+        value: public,extensions
+      - key: APP_DB_USER
+        value: noise_app
+      # Valid only for a new, dedicated Supabase project. Never resets a role.
+      - key: BOOTSTRAP_FRESH_SUPABASE
+        value: "true"
+      - key: APP_DB_PASSWORD
+        generateValue: true
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: SUPABASE_DB_PASSWORD
+        sync: false
+      - key: SUPABASE_POOLER_HOST
+        sync: false
+      - key: SUPABASE_PROJECT_REF
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: urbanecho-originals
+      - key: DB_POOL_SIZE
+        value: "3"
+      - key: DB_MAX_OVERFLOW
+        value: "1"

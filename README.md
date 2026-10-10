@@ -190,7 +190,9 @@ Recordings below the threshold, unusable recordings accepted as valid WAV, histo
 
 The application runs locally at **http://localhost:8000/app**. The ngrok tunnel and its local setup were removed on 9 October 2026. Docker exposes the application only on this Mac at `127.0.0.1:8000`; keep Docker running.
 
-For Railway, see [RAILWAY.md](RAILWAY.md). A fresh deployment attempt on **10 October 2026** confirmed that the workspace account restriction still blocks deployment and requires a paid-plan upgrade. The prepared project is **not live**; no public application URL is verified.
+For independent free hosting, see [RENDER.md](RENDER.md). Render runs the application and its workers; Supabase stores the database and immutable originals in a private bucket. Uploads are accepted only after the original is stored remotely, and playback restores verified originals when the server's temporary cache is empty. The free service sleeps when idle, pausing background processing until it wakes. Cloud deployment is being configured; no public application URL is verified yet.
+
+The earlier Railway deployment remains blocked by a paid-plan account requirement. See [RAILWAY.md](RAILWAY.md) for that attempt's status.
 
 ## Simulator and physical device integration
 

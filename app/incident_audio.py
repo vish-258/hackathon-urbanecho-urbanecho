@@ -21,6 +21,7 @@ from sqlalchemy import select, text
 from app.audio import validate_wav
 from app.daily import source_kind
 from app.models import AudioChunk, DeviceAssignment, Measurement, MeasurementEvaluation, StreamState
+from app.object_storage import AudioReadLimitError
 from app.storage import resolve_audio_path
 
 MAX_RECORDINGS = 10_000
@@ -116,7 +117,7 @@ def collect_sources(session, incident, snapshot_at, settings):
 
 
 def verified_original(chunk, settings):
-    path = resolve_audio_path(chunk.file_path, settings)
+    path = resolve_audio_path(chunk.file_path, settings, checksum=chunk.checksum)
     if path.stat().st_size > WAV_LIMITS.max_upload_bytes:
         raise ValueError("Original audio exceeds the supported size")
     with path.open("rb") as source:
@@ -162,14 +163,24 @@ def build_manifest(sources, settings):
         if compatible is not None and (chunk.sample_rate, expected_width, source_kind(chunk)) != compatible:
             excluded.append({"audio_id": str(chunk.id), "reason": "incompatible_audio_format_or_source"})
             continue
+        remaining_bytes = MAX_SOURCE_BYTES - source_bytes
+        if read_limit_reached or remaining_bytes <= 0:
+            read_limit_reached = True
+            excluded.append({"audio_id": str(chunk.id), "reason": "source_read_limit"})
+            continue
         try:
-            size = resolve_audio_path(chunk.file_path, settings).stat().st_size
+            size = resolve_audio_path(chunk.file_path, settings, checksum=chunk.checksum,
+                                      max_bytes=remaining_bytes).stat().st_size
             if size + source_bytes > MAX_SOURCE_BYTES:
                 excluded.append({"audio_id": str(chunk.id), "reason": "source_read_limit"})
                 read_limit_reached = True
                 continue
             source_bytes += size
             path, info = verified_original(chunk, settings)
+        except AudioReadLimitError:
+            excluded.append({"audio_id": str(chunk.id), "reason": "source_read_limit"})
+            read_limit_reached = True
+            continue
         except (OSError, ValueError):
             excluded.append({"audio_id": str(chunk.id), "reason": "original_unavailable_or_invalid"})
             continue

@@ -148,7 +148,7 @@ def session_recording(key: str, db: DB, token: Token):
         if previous_end is not None and abs((row.captured_at - previous_end).total_seconds()) > .001:
             raise HTTPException(409, "Session capture windows contain a gap or overlap; download individual recordings")
         previous_end = row.captured_at + timedelta(seconds=row.duration_seconds)
-        path = resolve_audio_path(row.file_path, get_settings())
+        path = resolve_audio_path(row.file_path, get_settings(), checksum=row.checksum)
         if not path.is_file():
             raise HTTPException(503, "Original audio unavailable; restore storage from backup")
         payload = path.read_bytes()

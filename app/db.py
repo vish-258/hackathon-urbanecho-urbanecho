@@ -14,8 +14,10 @@ logger = logging.getLogger(__name__)
 
 @lru_cache
 def get_engine():
+    settings = get_settings()
     return create_engine(
-        get_settings().database_url, pool_pre_ping=True, pool_recycle=300,
+        settings.database_url, pool_pre_ping=True, pool_recycle=300,
+        pool_size=settings.db_pool_size, max_overflow=settings.db_max_overflow,
         connect_args={"connect_timeout": 5, "application_name": "noise-monitor", "options": "-c timezone=UTC"},
     )
 

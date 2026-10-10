@@ -2,7 +2,10 @@
 
 Run ``python -m app.reconcile`` to inspect, then add ``--delete-orphans`` to
 remove files which have no audio_chunks reference. Committed audio is never
-deleted. Database and audio backups must be restored from a consistent point.
+deleted. With Supabase this reconciles only the disposable local cache, never
+remote objects. Cache misses are reported separately; originals are fetched and
+verified on demand instead of downloading the bucket under a database lock.
+Database and audio backups must be restored from a consistent point.
 """
 from __future__ import annotations
 
@@ -35,12 +38,23 @@ def reconcile(settings: Any | None = None, *, delete_orphans: bool = False) -> d
                     if path.is_file() and not path.is_symlink() and re.fullmatch(pattern, reference):
                         candidates.add(reference)
         orphans = sorted(candidates - references)
-        missing = sorted(reference for reference in references if not resolve_audio_path(reference, settings).is_file())
+        remote = getattr(settings, "audio_storage_backend", "filesystem") == "supabase"
+        if remote:
+            # Absence from an ephemeral cache is expected after a restart. Never
+            # label it missing evidence or fetch every original during startup.
+            uncached = sorted(references - candidates)
+            missing = []
+        else:
+            uncached = []
+            missing = sorted(reference for reference in references if not resolve_audio_path(reference, settings).is_file())
         if delete_orphans:
             for reference in orphans:
                 remove_audio(reference, settings)
-        return {"orphan_files": orphans, "missing_committed_files": missing,
-                "deleted_count": len(orphans) if delete_orphans else 0}
+        report = {"orphan_files": orphans, "missing_committed_files": missing,
+                  "deleted_count": len(orphans) if delete_orphans else 0}
+        if remote:
+            report.update(uncached_committed_files=uncached, remote_storage_checked=False)
+        return report
 
 
 def main() -> None:

@@ -1,15 +1,17 @@
 """Validated runtime configuration. Database credentials never have defaults."""
 from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False, hide_input_in_errors=True)
 
     database_url: str | None = None
     db_host: str = "db"
@@ -23,11 +25,18 @@ class Settings(BaseSettings):
     local_browser_access: bool = False
     local_browser_port: int = Field(default=8000, ge=1, le=65535)
     audio_root: Path = Path("/data/audio")
+    audio_storage_backend: Literal["filesystem", "supabase"] = "filesystem"
+    supabase_url: str | None = None
+    supabase_service_role_key: SecretStr | None = Field(default=None, repr=False)
+    supabase_storage_bucket: str | None = None
+    audio_storage_timeout_seconds: float = Field(default=30, ge=1, le=120)
     max_upload_bytes: int = Field(default=20_000_000, gt=44)
     max_duration_seconds: float = Field(default=60, gt=0, le=600)
     allowed_sample_rates: list[int] = [16000, 32000, 44100, 48000]
     db_retry_attempts: int = Field(default=5, ge=1, le=30)
     db_retry_delay_seconds: float = Field(default=1, ge=0, le=30)
+    db_pool_size: int = Field(default=5, ge=1, le=20)
+    db_max_overflow: int = Field(default=10, ge=0, le=20)
     worker_poll_seconds: float = Field(default=1, gt=0)
     job_lease_seconds: int = Field(default=120, ge=10)
     job_max_attempts: int = Field(default=5, ge=1)
@@ -58,6 +67,22 @@ class Settings(BaseSettings):
     sse_poll_seconds: float = Field(default=0.25, ge=0.01, le=30)
     sse_heartbeat_seconds: float = Field(default=10, ge=0.05, le=60)
     sse_batch_size: int = Field(default=100, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def validate_audio_storage(self):
+        if self.audio_storage_backend == "supabase":
+            if not self.supabase_url or not self.supabase_storage_bucket or not self.supabase_service_role_key:
+                raise ValueError("Supabase audio storage requires URL, service role key and private bucket")
+            url = urlsplit(self.supabase_url)
+            if (url.scheme != "https" or not url.hostname or url.username or url.password
+                    or url.path not in ("", "/") or url.query or url.fragment):
+                raise ValueError("SUPABASE_URL must be an HTTPS origin without credentials, path or query")
+            self.supabase_url = self.supabase_url.rstrip("/")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", self.supabase_storage_bucket):
+                raise ValueError("SUPABASE_STORAGE_BUCKET must be a simple bucket identifier")
+            if not self.supabase_service_role_key.get_secret_value().strip():
+                raise ValueError("SUPABASE_SERVICE_ROLE_KEY must not be empty")
+        return self
 
     @model_validator(mode="after")
     def validate_database(self):

@@ -461,7 +461,7 @@ def create_app():
                 raise HTTPException(401, "Bearer token required", headers={"WWW-Authenticate": "Bearer"})
             require_admin(request, None)
             row = require_row(db, AudioChunk, chunk_id)
-        path = resolve_audio_path(row.file_path, get_settings())
+        path = resolve_audio_path(row.file_path, get_settings(), checksum=row.checksum)
         if not path.is_file():
             raise HTTPException(503, "Original audio unavailable; restore storage from backup")
         return FileResponse(path, media_type="audio/wav", filename=f"{row.id}.wav",

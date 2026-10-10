@@ -86,7 +86,7 @@ def calculate_measurement(chunk: AudioChunk, settings: Any) -> MeasurementResult
     The supplied offset must come from a real measurement/calibration of the full
     microphone chain. It is not a claim of IEC sound-level-meter certification.
     """
-    path = resolve_audio_path(chunk.file_path, settings)
+    path = resolve_audio_path(chunk.file_path, settings, checksum=chunk.checksum)
     with path.open("rb") as stream:
         checksum = hashlib.file_digest(stream, "sha256").hexdigest()
     if checksum != chunk.checksum:

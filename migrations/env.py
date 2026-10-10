@@ -9,6 +9,7 @@ from sqlalchemy.engine import URL
 from sqlalchemy.exc import OperationalError, InterfaceError
 
 from app.models import Base
+from scripts.migration_config import migration_search_path
 
 config = context.config
 if config.config_file_name:
@@ -44,6 +45,7 @@ def run_migrations_offline():
                       literal_binds=True, dialect_opts={"paramstyle": "named"},
                       include_object=include_object)
     with context.begin_transaction():
+        context.execute("SET search_path TO " + migration_search_path(os.environ.get("MIGRATION_SEARCH_PATH", "public")))
         context.run_migrations()
 
 
@@ -60,10 +62,10 @@ def run_migrations_online():
                 raise
             time.sleep(min(2 ** attempt, 10))
     with connection:
-        # The PostGIS Docker image adds tiger/topology to its default search
-        # path. Reflection without an explicit public-only path would treat
-        # their extension-owned tables as application tables to remove.
-        connection.exec_driver_sql("SET SESSION search_path TO public")
+        # Local PostGIS remains in public; Supabase installs it in extensions.
+        # Never inherit tiger/topology or an arbitrary externally supplied path.
+        path = migration_search_path(os.environ.get("MIGRATION_SEARCH_PATH", "public"))
+        connection.exec_driver_sql("SET SESSION search_path TO " + path)
         connection.commit()
         context.configure(connection=connection, target_metadata=target_metadata,
                           compare_type=True, include_object=include_object)
