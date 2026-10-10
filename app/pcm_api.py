@@ -92,7 +92,8 @@ async def device_text(request: Request, db: DB, token: Token, x_device_id: Devic
 @router.post("/upload")
 async def raw_upload(request: Request, db: DB, token: Token,
                      x_device_id: DeviceHeader, x_session: SessionHeader,
-                     x_seq: SequenceHeader, x_captured_at: CapturedHeader):
+                     x_seq: SequenceHeader, x_captured_at: CapturedHeader,
+                     x_capture_interval_ms: Annotated[int | None, Header(alias="X-Capture-Interval-Ms", ge=1, le=3600000)] = None):
     """Signed little-endian PCM16, mono 16 kHz. Timestamp is capture START.
 
     HTTP 200 acknowledges durable acceptance or an identical retry, not completed
@@ -109,7 +110,8 @@ async def raw_upload(request: Request, db: DB, token: Token,
     # Raw sample pairs can have any byte values, including a RIFF-like prefix.
     # The declared transport determines interpretation; do not magic-sniff PCM.
     meta = UploadMetadata(device_id=identity, chunk_id=f"pcm16:{x_session}:{x_seq}",
-                          session_id=f"pcm16-{x_session}", sequence=x_seq, captured_at=x_captured_at)
+                          session_id=f"pcm16-{x_session}", sequence=x_seq, captured_at=x_captured_at,
+                          capture_interval_ms=x_capture_interval_ms)
     # The header is deterministic and the PCM sample bytes are unchanged.
     result = await run_in_threadpool(ingest_recording, db, token, meta, io.BytesIO(pcm_wav(body)), audio_format=FORMAT)
     key = f"{identity.hex}_{x_session}"

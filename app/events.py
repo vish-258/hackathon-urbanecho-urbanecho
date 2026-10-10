@@ -31,8 +31,20 @@ PUBLIC_FIELDS = frozenset({
     "incident_status", "transition_reason", "noise_status", "data_status",
     "peak_db", "latest_db", "breach_count", "recovery_streak", "recovery_count",
     "started_at", "ended_at", "last_occurrence_at", "previous_incident_id",
-    "last_measurement_at", "diagnostic", "quality_status", "calibration_status",
+    "last_measurement_at", "diagnostic", "quality_status", "calibration_status", "eligible_reading",
 })
+
+
+def serialize_stream_reading(state, measurement):
+    """Public eligible reading, shared by snapshots and events; never the rejected observation."""
+    return {
+        "measurement_value": state.last_value, "measured_at": state.watermark,
+        "received_at": measurement.received_at if measurement else None,
+        "measurement_type": measurement.measurement_type if measurement else None,
+        "weighting": measurement.weighting if measurement else None,
+        "interval_seconds": measurement.interval_seconds if measurement else None,
+        "calibration_status": measurement.calibration_status if measurement else None,
+    }
 
 
 def lock_event_clock(session):
@@ -170,6 +182,7 @@ def sweep_freshness(session, settings=None):
             "measured_at": state.watermark, "noise_status": state.noise_status,
             "data_status": "stale", "incident_status": incident.status if incident else None,
             "transition_reason": "data_stale", "recovery_streak": state.recovery_streak,
+            "eligible_reading": serialize_stream_reading(state, measurement),
         }
         emit_event(session, "location.status_changed", payload,
                    incident_id=incident.id if incident else None, device_id=state.device_id,

@@ -17,8 +17,8 @@ export function freshnessLabel(location) {
  if (!location?.streams?.length) return 'No readings yet';
  if (location.data_status === 'fresh') return 'Reporting';
  if (location.data_status === 'invalid') return 'Reading needs attention';
- const hasReportingDevice = location.streams.some(stream => stream.data_status === 'fresh' &&
-   (location.devices || []).some(device => device.enabled && device.id === stream.device_id && device.assignment_id === stream.assignment_id));
+ const hasReportingDevice = (location.devices || []).some(device =>
+   deviceReporting({...device, current_assignment_id:device.assignment_id}, location).reporting);
  return hasReportingDevice ? 'Some devices not reporting' : 'No recent data';
 }
 // Reporting means a usable reading inside the server's stale window. The server marks

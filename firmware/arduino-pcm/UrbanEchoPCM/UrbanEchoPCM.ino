@@ -23,6 +23,11 @@
 #include "config.example.h"
 #endif
 
+// Existing private configurations keep using explicitly supplied Wi-Fi settings.
+#ifndef UE_USE_SAVED_WIFI
+#define UE_USE_SAVED_WIFI false
+#endif
+
 constexpr unsigned SAMPLE_RATE = 16000;
 constexpr unsigned RECORDING_SAMPLES = SAMPLE_RATE; // One second: backend interval must be 1.
 constexpr unsigned RECORDING_BYTES = RECORDING_SAMPLES * sizeof(int16_t);
@@ -44,6 +49,7 @@ struct AudioSlot {
   int16_t samples[RECORDING_SAMPLES];
   uint64_t seq;
   char capturedAt[32];
+  unsigned captureIntervalMs;
   unsigned rms;
   unsigned peak;
   unsigned clipped;
@@ -63,9 +69,9 @@ portMUX_TYPE stateLock = portMUX_INITIALIZER_UNLOCKED;
 int64_t lastSyncUs = 0;
 int64_t dmaOriginUs = 0;
 uint32_t dmaOverflows = 0;
-// Empty UE_DEVICE_ID/UE_DEVICE_TOKEN let one firmware serve every board: the ID comes from
-// the chip MAC and the token from NVS, written over USB by scripts/provision-board.py.
-char deviceId[37]{};
+// Identity always comes from the factory chip MAC. An empty UE_DEVICE_TOKEN uses
+// the token in NVS, written over USB by scripts/provision-board.py.
+char deviceId[17]{}; // ESP- followed by all 12 uppercase MAC hex digits and a terminator.
 char deviceToken[129]{};
 constexpr char NVS_NAMESPACE[] = "urbanecho";
 constexpr char NVS_TOKEN_KEY[] = "token";
@@ -88,17 +94,6 @@ bool validUuid(const char* value) {
   return true;
 }
 
-bool validDeviceId(const char* value) {
-  size_t length = strlen(value);
-  if (length == 36) return validUuid(value);
-  if (!length || length > 32) return false;
-  for (size_t i = 0; i < length; ++i) {
-    unsigned char ch = static_cast<unsigned char>(value[i]);
-    if (!isalnum(ch) && ch != '_' && ch != '-') return false;
-  }
-  return true;
-}
-
 bool validToken(const char* value) {
   size_t length = strlen(value);
   if (length < 16 || length >= sizeof(deviceToken)) return false;
@@ -109,20 +104,27 @@ bool validToken(const char* value) {
   return true;
 }
 
-void resolveIdentity() {
-  if (UE_DEVICE_ID[0]) snprintf(deviceId, sizeof(deviceId), "%s", UE_DEVICE_ID);
-  else {
-    uint8_t mac[6]{};
-    esp_efuse_mac_get_default(mac);
-    snprintf(deviceId, sizeof(deviceId), "ESP-%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+bool resolveIdentity() {
+  uint8_t mac[6]{};
+  if (esp_efuse_mac_get_default(mac) != ESP_OK) {
+    Serial.println("IDENTITY ERROR: could not read the factory chip MAC; capture is disabled.");
+    return false;
   }
-  if (UE_DEVICE_TOKEN[0]) snprintf(deviceToken, sizeof(deviceToken), "%s", UE_DEVICE_TOKEN);
-  else {
+  snprintf(deviceId, sizeof(deviceId), "ESP-%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  if (UE_DEVICE_TOKEN[0]) {
+    // Validate before copying: a shortened credential must never look provisioned.
+    if (!validToken(UE_DEVICE_TOKEN)) {
+      Serial.println("Invalid UE_DEVICE_TOKEN: use 16-128 letters, digits, _ or -, or leave it empty for USB provisioning.");
+      return false;
+    }
+    memcpy(deviceToken, UE_DEVICE_TOKEN, strlen(UE_DEVICE_TOKEN) + 1);
+  } else {
     Preferences prefs;
     if (prefs.begin(NVS_NAMESPACE, true)) prefs.getString(NVS_TOKEN_KEY, deviceToken, sizeof(deviceToken));
     prefs.end();
     if (!validToken(deviceToken)) deviceToken[0] = '\0';
   }
+  return true;
 }
 
 void printIdentity() {
@@ -268,16 +270,21 @@ bool beginRequest(HTTPClient& http, WiFiClient& plain, WiFiClientSecure& secure,
   http.setConnectTimeout(5000);
   http.setTimeout(UE_HTTP_TIMEOUT_MS);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
-  http.setReuse(false);
+  // The uploader owns these clients for its whole lifetime. Reusing a validated,
+  // fully consumed response avoids a new TLS handshake for every audio second.
+  http.setReuse(true);
   http.addHeader("Authorization", String("Bearer ") + deviceToken);
   http.addHeader("X-Device-Id", deviceId);
   return true;
 }
 
-int sendText(const char* message) {
-  WiFiClientSecure secure;
-  WiFiClient plain;
-  HTTPClient http;
+void finishRequest(HTTPClient& http, WiFiClient& plain, WiFiClientSecure& secure, bool reusable) {
+  http.setReuse(reusable);
+  http.end();
+  if (!reusable) { secure.stop(); plain.stop(); }
+}
+
+int sendText(const char* message, HTTPClient& http, WiFiClient& plain, WiFiClientSecure& secure) {
   if (!beginRequest(http, plain, secure, "/text")) return -100;
   // Status is expendable: do not let its timeout consume an audio-sized retry budget.
   http.setConnectTimeout(500);
@@ -285,7 +292,10 @@ int sendText(const char* message) {
   if (UE_USE_HTTPS) secure.setHandshakeTimeout(1);
   http.addHeader("Content-Type", "text/plain; charset=utf-8");
   int code = http.POST(reinterpret_cast<uint8_t*>(const_cast<char*>(message)), strlen(message));
-  http.end();
+  int size = http.getSize();
+  bool consumed = false;
+  if (code == 200 && size > 0 && size <= 1024) consumed = http.getString().length() == size;
+  finishRequest(http, plain, secure, consumed);
   return code;
 }
 
@@ -338,6 +348,7 @@ void captureTask(void*) {
       int64_t startMonoUs = dmaSnapshot().originUs + int64_t(framesRead * 1000000ULL / SAMPLE_RATE);
       if (record) {
         record->seq = recordSeq;
+        record->captureIntervalMs = UE_CAPTURE_INTERVAL_MS;
         healthy = healthy && formatUtc(startMonoUs + anchor.offsetUs, record->capturedAt, sizeof(record->capturedAt));
       }
       size_t filled = 0;
@@ -407,11 +418,17 @@ void captureTask(void*) {
 }
 
 void uploadTask(void*) {
+  // Audio and diagnostics use one serialized connection, never two TLS heaps.
+  // Originals and retry identifiers remain fixed until their ACK is validated.
+  WiFiClientSecure secure;
+  WiFiClient plain;
+  HTTPClient http;
   uint32_t lastStatusMs = 0, lastStatsMs = 0, lastWifiAttemptMs = 0;
   int64_t nextUploadUs = 0;
   while (true) {
-    if (fatalUpload.load()) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+    if (fatalUpload.load()) { finishRequest(http, plain, secure, false); vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttemptMs > 5000) {
+      finishRequest(http, plain, secure, false);
       WiFi.reconnect(); lastWifiAttemptMs = millis();
     }
     uint8_t slot = 0;
@@ -423,23 +440,28 @@ void uploadTask(void*) {
         int code = -1;
         char savedId[37]{};
         if (WiFi.status() == WL_CONNECTED && clockSnapshot().valid) {
-          WiFiClientSecure secure;
-          WiFiClient plain;
-          HTTPClient http;
           if (beginRequest(http, plain, secure, "/upload")) {
             char sequence[24]{};
             snprintf(sequence, sizeof(sequence), "%llu", (unsigned long long)c.seq);
+            char captureInterval[16]{};
+            snprintf(captureInterval, sizeof(captureInterval), "%u", c.captureIntervalMs);
             http.addHeader("Content-Type", "application/octet-stream");
             http.addHeader("X-Session", sessionId);
             http.addHeader("X-Seq", sequence);
             http.addHeader("X-Captured-At", c.capturedAt);
+            http.addHeader("X-Capture-Interval-Ms", captureInterval);
             code = http.POST(reinterpret_cast<uint8_t*>(c.samples), RECORDING_BYTES);
             // FastAPI sends a bounded Content-Length JSON ACK; never consume arbitrary response bodies.
-            if (code == 200 && http.getSize() > 0 && http.getSize() <= 1024)
-              saved = parseAck(http.getString(), c.seq, savedId, sizeof(savedId));
-            http.end();
+            int size = http.getSize();
+            if (code == 200 && size > 0 && size <= 1024) {
+              String body = http.getString();
+              saved = body.length() == size && parseAck(body, c.seq, savedId, sizeof(savedId));
+            }
+            finishRequest(http, plain, secure, saved);
+          } else {
+            finishRequest(http, plain, secure, false);
           }
-        } else WiFi.reconnect();
+        } else { finishRequest(http, plain, secure, false); WiFi.reconnect(); }
         Serial.printf("seq=%llu http=%d attempt=%u rms=%u peak=%u clipped=%u%s%s\n",
           (unsigned long long)c.seq, code, attempt + 1, c.rms, c.peak, c.clipped,
           saved ? " saved_audio_id=" : "", saved ? savedId : "");
@@ -467,7 +489,7 @@ void uploadTask(void*) {
     if (!fatalUpload.load() && uxQueueMessagesWaiting(readyQ) == 0 &&
         WiFi.status() == WL_CONNECTED && clockSnapshot().valid && millis() - lastStatusMs >= 10000) {
       StatusMsg msg{};
-      if (xQueueReceive(statusQ, &msg, 0) == pdTRUE) Serial.printf("status http=%d\n", sendText(msg.text));
+      if (xQueueReceive(statusQ, &msg, 0) == pdTRUE) Serial.printf("status http=%d\n", sendText(msg.text, http, plain, secure));
       lastStatusMs = millis();
     }
   }
@@ -476,12 +498,12 @@ void uploadTask(void*) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  resolveIdentity();
-  bool configured = UE_CONFIGURED && strlen(UE_WIFI_SSID) > 0 && !strstr(UE_HOST, "YOUR_") && !strstr(UE_HOST, "://") && !strchr(UE_HOST, '/') &&
+  bool identityReady = resolveIdentity();
+  bool configured = UE_CONFIGURED &&
+    (UE_USE_SAVED_WIFI || strlen(UE_WIFI_SSID) > 0) && !strstr(UE_HOST, "YOUR_") && !strstr(UE_HOST, "://") && !strchr(UE_HOST, '/') &&
     (UE_USE_HTTPS ? strncmp(UE_CA_CERT, "-----BEGIN CERTIFICATE-----", 27) == 0 && !strstr(UE_CA_CERT, "PASTE_") : UE_ALLOW_HTTP_BENCH);
-  if (!configured || !validDeviceId(deviceId)) {
-    Serial.println(configured ? "Invalid UE_DEVICE_ID: use 1-32 letters, digits, _ or -, or leave it empty for the chip ID."
-                              : "Not configured. Copy config.example.h to privateconfig.h and complete the shared settings.");
+  if (!configured || !identityReady) {
+    if (!configured) Serial.println("Not configured. Copy config.example.h to privateconfig.h and complete the shared settings.");
     while (true) { pollSerial(false); delay(20); }
   }
   printIdentity();
@@ -504,14 +526,20 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.setSleep(false);
-  WiFi.begin(UE_WIFI_SSID, UE_WIFI_PASSWORD);
+  if (UE_USE_SAVED_WIFI) {
+    Serial.println("Wi-Fi mode: saved device settings");
+    WiFi.begin(); // SDK reuses its stored configuration; do not read or replace it.
+  } else {
+    Serial.println("Wi-Fi mode: private configuration");
+    WiFi.begin(UE_WIFI_SSID, UE_WIFI_PASSWORD);
+  }
   uint8_t nonce[16];
   esp_fill_random(nonce, sizeof(nonce)); // Wi-Fi entropy is active; session never changes during retries.
   for (unsigned i = 0; i < sizeof(nonce); ++i) snprintf(sessionId + i * 2, 3, "%02x", nonce[i]);
   sntp_set_time_sync_notification_cb(onClockSync);
   configTime(0, 0, UE_SNTP_SERVER, UE_SNTP_BACKUP);
   esp_sntp_set_sync_interval(15UL * 60 * 1000);
-  postStatus("BOOT: %s; session=%s; PCM16 mono 16000Hz 1s gain %.1f UNCALIBRATED", deviceId, sessionId, double(UE_GAIN));
+  postStatus("BOOT: %s; session=%s; PCM16 mono 16000Hz 1s every %ums gain %.1f UNCALIBRATED", deviceId, sessionId, UE_CAPTURE_INTERVAL_MS, double(UE_GAIN));
   Serial.printf("Audio endpoint: %s/upload. Waiting for Wi-Fi and synchronized UTC.\n", baseUrl().c_str());
   if (xTaskCreatePinnedToCore(captureTask, "capture", 6144, nullptr, 3, nullptr, 1) != pdPASS ||
       xTaskCreatePinnedToCore(uploadTask, "upload", 12288, nullptr, 2, nullptr, 0) != pdPASS) {
@@ -521,6 +549,14 @@ void setup() {
 }
 
 void loop() {
+  // Report connection transitions locally, without network names or credentials.
+  static bool wifiConnected = false;
+  bool connectedNow = WiFi.status() == WL_CONNECTED;
+  if (connectedNow != wifiConnected) {
+    wifiConnected = connectedNow;
+    if (connectedNow) Serial.printf("Wi-Fi connected: IP %s\n", WiFi.localIP().toString().c_str());
+    else Serial.println("Wi-Fi disconnected; waiting for reconnection");
+  }
   // Queue bounded serial diagnostics rather than opening a competing HTTP connection.
   pollSerial(true);
   vTaskDelay(pdMS_TO_TICKS(20));

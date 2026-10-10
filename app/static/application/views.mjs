@@ -1,5 +1,9 @@
 import { el, button, formatLevel, formatTime, short, badge, field, empty, locationName, errorBox, freshnessLabel, deviceLabel } from './ui.mjs';
 import { liveChanges, mergeChanges, locationChanges, coalesceAsync } from './refresh.mjs';
+import { deviceConnection, deviceReadingStatus, startDeviceContactMonitor } from './device-health.mjs';
+import { createRecordingPlayer, createRecordingsBrowser } from './recordings.mjs';
+import { classificationNode } from './classification.mjs';
+import { createIncidentAudio } from './incident-audio.mjs';
 
 const PAGE_SIZE = 25;
 const CHART_PAGE = 200;
@@ -43,7 +47,7 @@ const summaryStatus = stats => stats.coverage_status === 'complete' ? 'Complete 
 const summarySource = definition => definition.source_kind === 'simulated' ? 'SIMULATED' : 'Recorded measurements';
 const summaryLevel = (value, definition) => isNumber(value) ? formatLevel(value, definition.measurement_type) : 'No usable data';
 
-function dailySummaryCard(summary, timezone, compact = false) {
+function dailySummaryCard(summary, timezone, compact = false, devices = []) {
   const definition = summary.definition || {}, stats = summary.statistics || {};
   const panel = compact ? el('article', '', 'report-compact') : section(definition.measurement_type === 'dbfs_rms' ? 'Digital signal levels' : 'Sound pressure · Z weighting');
   const status = el('div', '', 'report-status');
@@ -71,7 +75,7 @@ function dailySummaryCard(summary, timezone, compact = false) {
   if (definition.source_kind === 'simulated') panel.append(el('p', 'Demonstration recordings only. These values do not represent real calibrated environmental measurements.', 'view-demo-note'));
   if (stats.coverage_status !== 'complete') panel.append(el('p', stats.coverage_status === 'no_data' ? 'No usable measurements were available for this definition. No sound level has been substituted.' : 'This result describes only the recorded time shown above. It is not a fully monitored daily noise level.', 'report-coverage-note'));
   if (stats.is_provisional) panel.append(el('p', 'This local day is still in progress. Generate again after it ends to include its later recordings.', 'muted'));
-  if (definition.measurement_type === 'dbfs_rms') panel.append(el('p', `Digital levels belong to device ${short(definition.device_id)} and are kept separate from other devices. They are not calibrated sound-pressure levels.`, 'muted'));
+  if (definition.measurement_type === 'dbfs_rms') panel.append(el('p', `Digital levels belong to device ${deviceLabel(definition, devices)} and are kept separate from other devices. They are not calibrated sound-pressure levels.`, 'muted'));
   const details = el('details', '', 'view-disclosure report-calculation');
   details.append(el('summary', 'Calculation and data quality'));
   const descriptions = el('dl', '', 'view-record-grid');
@@ -81,7 +85,7 @@ function dailySummaryCard(summary, timezone, compact = false) {
     ['Overlapping recording time', recordedTime(stats.overlap_seconds)],
     ['Excluded recordings', String(stats.excluded_count ?? 0)],
     ['Sound processing version', definition.processing_version || 'Unavailable'],
-    ...(definition.device_id ? [['Device identity', definition.device_id]] : []),
+    ...(definition.device_id ? [['Device identity', deviceLabel(definition, devices)], ['Internal device ID', definition.device_id]] : []),
   ]) { const group = el('div'); group.append(el('dt', label), el('dd', value)); descriptions.append(group); }
   details.append(descriptions);
   const excluded = Object.entries(stats.exclusion_reasons || {}).filter(([, count]) => count > 0);
@@ -192,7 +196,7 @@ function liveRefresh(ctx, callback, accepts = () => true) {
       if (disposed || ctx.signal?.aborted) return;
       const changes = pending; pending = liveChanges(); dirty = false; running = true;
       try { await callback(changes); }
-      catch (error) { if (!disposed && !ctx.signal?.aborted) ctx.notify?.(errorMessage(error)); }
+      catch (error) { if (!disposed && !ctx.signal?.aborted) ctx.reportLiveError?.(errorMessage(error)); }
       finally { running = false; if (dirty) schedule(); }
     }, 1100);
   }
@@ -207,14 +211,18 @@ function safeApi(ctx, path, options = {}) {
   return ctx.api(path, { ...options, signal: ctx.signal });
 }
 
-function measurementRows(rows, ctx, timezone) {
-  return rows.map(row => [
+function measurementRows(rows, ctx, timezone, player) {
+  return rows.map(row => {
+    const recording = { ...row, id: row.audio_chunk_id }, playback = el('div', '', 'reading-recording');
+    if (player) { playback.append(player.listenButton(recording), classificationNode(row.classification, timezone, { hideUnrequested: true })); player.updateClassification(recording); }
+    return [
     stack(formatTime(row.measured_at, timezone), row.measured_at),
     stack(deviceLabel(row, ctx.devices), row.location_snapshot?.name || locationName(ctx, row.location_id)),
     stack(formatLevel(row.value_db, row.measurement_type), isNumber(row.value_db) ? `${row.value_db} ${unit(row.measurement_type)}` : readable(row.calibration_status)),
     formatLevel(row.threshold_value, row.threshold_type),
     stack(readable(row.evaluation?.status || row.quality_status), row.evaluation?.diagnostic ? readable(row.evaluation.diagnostic) : `${row.interval_seconds}s interval`),
-  ]);
+    ...(player ? [playback] : []),
+  ]; });
 }
 
 function incidentRows(rows, ctx, timezone) {
@@ -249,7 +257,7 @@ function tickTime(value, timezone, span) {
 
 // Null and invalid results break a series; samples separated by more than the
 // expected capture interval also remain separate. No missing values are filled.
-function chartNode(rows, versions, method, start, end, timezone, fit) {
+function chartNode(rows, versions, method, start, end, timezone, fit, devices = []) {
   const wrapper = el('div', '', 'noise-chart');
   const eligible = rows.filter(row => row.measurement_type === method && isNumber(row.value_db) && row.quality_status === 'good');
   if (!eligible.length) return empty('No eligible readings in this range', 'Choose another time range. Missing, invalid, or uncalibrated readings are never replaced with zero.');
@@ -315,7 +323,7 @@ function chartNode(rows, versions, method, start, end, timezone, fit) {
     series.filter(row => isNumber(row.value_db) && row.quality_status === 'good').forEach(row => {
       const time = new Date(row.measured_at).getTime();
       if (time < xStart || time > xEnd) return;
-      const exact = `Device ${short(deviceId)} · ${row.value_db} ${unit(method)} · ${formatTime(row.measured_at, timezone)} (${row.measured_at}) · saved threshold ${isNumber(row.threshold_value) ? `${row.threshold_value} ${unit(row.threshold_type)}` : 'unavailable'}${row.evaluation?.diagnostic ? ` · ${readable(row.evaluation.diagnostic)}` : ''}`;
+      const exact = `Device ${deviceLabel({device_id: deviceId}, devices)} · ${row.value_db} ${unit(method)} · ${formatTime(row.measured_at, timezone)} (${row.measured_at}) · saved threshold ${isNumber(row.threshold_value) ? `${row.threshold_value} ${unit(row.threshold_type)}` : 'unavailable'}${row.evaluation?.diagnostic ? ` · ${readable(row.evaluation.diagnostic)}` : ''}`;
       const point = svg('circle', { cx: x(time), cy: y(row.value_db), r: 4.3, fill: color, stroke: '#fff', 'stroke-width': 1.7, tabindex: 0, role: 'img', 'aria-label': exact, class: 'chart-reading' });
       point.append(svg('title', {}, exact));
       point.addEventListener('focus', () => { tooltip.textContent = exact; });
@@ -325,7 +333,7 @@ function chartNode(rows, versions, method, start, end, timezone, fit) {
     const item = el('span', '', 'chart-legend-item');
     const line = svg('svg', { width: 25, height: 10, 'aria-hidden': true });
     line.append(svg('line', { x1: 0, y1: 5, x2: 25, y2: 5, stroke: color, 'stroke-width': 2.4, 'stroke-dasharray': dash }));
-    item.append(line, el('span', `Device ${short(deviceId)}`));
+    item.append(line, el('span', `Device ${deviceLabel({device_id: deviceId}, devices)}`));
     legend.append(item);
   });
   const thresholdLegend = el('span', '', 'chart-legend-item');
@@ -366,7 +374,10 @@ async function locationView(container, route, ctx) {
   const readingsBody = el('div'); readings.append(readingsBody);
   chartSection.append(controls, chartError, chartArea, chartInfo, more, readings);
   const lower = el('div', '', 'view-detail-grid');
-  const devicesPanel = section('Assigned devices', 'Identity, last server contact, and current reading state.');
+  const devicesPanel = section('Assigned devices', 'Connection tracks recent uploads or diagnostic messages. Readings show whether the sound measurements are usable. Contact is checked every 2 seconds.');
+  const contactFeedback = el('p', '', 'muted small'); contactFeedback.setAttribute('role', 'status');
+  const deviceContacts = new Map();
+  devicesPanel.append(contactFeedback);
   const devicesBody = el('div'); devicesPanel.append(devicesBody);
   const thresholdPanel = section('Threshold history', 'Changing a setting never rewrites a saved incident.');
   const thresholdBody = el('div'); thresholdPanel.append(thresholdBody, link('Manage thresholds →', '#/management', ctx));
@@ -377,7 +388,11 @@ async function locationView(container, route, ctx) {
   const dailyBody = el('div');
   dailyBody.append(el('p', 'Loading saved daily summaries…', 'muted'));
   daily.append(dailyBody, link('Open daily reports / recalculate →', `#/reports?location=${encodeURIComponent(location.id)}`, ctx));
-  container.append(summary, chartSection, lower, recent, daily);
+  const recordingsPanel = section('Saved 10-second recordings', 'Listen to complete continuous recordings from each device, including uncalibrated audio. Short individual recordings remain linked to their readings below.');
+  const player = createRecordingPlayer(ctx, { timezone: location.timezone });
+  const recordings = createRecordingsBrowser(ctx, { locationId: location.id, timezone: location.timezone, devices: assignedDevices, player });
+  recordingsPanel.append(player.element, recordings.element);
+  container.append(summary, recordingsPanel, chartSection, lower, recent, daily);
 
   function renderSummary(threshold) {
     const current = ctx.state.locations.get(location.id);
@@ -389,28 +404,41 @@ async function locationView(container, route, ctx) {
       metric('Noise condition', current?.noise_status === 'unknown' || !current ? 'Not evaluated' : readable(current.noise_status), (current?.unresolved_incident_ids || []).length ? `${current.unresolved_incident_ids.length} unresolved incident(s)` : 'No unresolved incidents'),
       metric('Data freshness', freshnessLabel(current), current?.data_status === 'stale' ? 'Based on all assigned devices; check each device below.' : 'Based on capture time'),
     );
+    renderDeviceStatuses();
+  }
+
+  function renderDeviceStatuses() {
+    if (disposed || ctx.signal?.aborted) return;
+    const current = ctx.state.locations.get(location.id);
+    const now = ctx.serverNow?.() ?? Date.now(), staleSeconds = ctx.dataStaleSeconds?.() ?? 30;
     const assigned = assignedDevices;
     devicesBody.replaceChildren();
     if (!assigned.length) devicesBody.append(empty('No assigned devices', 'Register a device in Management to begin receiving recordings.'));
     for (const device of assigned) {
-      const stream = streams.filter(item => item.device_id === device.id && item.assignment_id === device.current_assignment_id).sort((a, b) => new Date(b.measured_at || 0) - new Date(a.measured_at || 0))[0];
-      const lastContact = [device.last_contact_at, stream?.received_at].filter(Boolean).sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+      const connection = deviceConnection(device, current, { contact: deviceContacts.get(device.id), now, staleSeconds });
+      const reading = deviceReadingStatus({ ...device, last_contact_at: connection.contact }, { ...location, current_threshold: currentThreshold?.current }, current);
+      const age = connection.ageSeconds === null ? '' : ` (${connection.ageSeconds} s ago)`;
       const item = el('div', '', 'view-device-row');
-      const identity = el('div'); identity.append(el('strong', device.external_id || device.microphone_model), el('code', device.external_id ? `${device.microphone_model} · ${device.id}` : device.id, 'view-device-id'), el('small', `Last contact: ${lastContact ? formatTime(lastContact, location.timezone) : 'Never received'}`, 'muted'));
-      if (lastContact) identity.lastChild.title = lastContact;
-      const status = !device.enabled ? 'Disabled' : !stream ? 'No readings yet' : stream.data_status === 'fresh' ? 'Reporting' : stream.data_status === 'invalid' ? 'Reporting · latest reading unusable' : readable(stream.data_status);
-      item.append(identity, badge(status, status === 'Reporting' ? 'good' : 'neutral'));
+      const identity = el('div'); identity.append(el('strong', device.external_id || device.microphone_model), el('code', device.external_id ? `${device.microphone_model} · ${device.id}` : device.id, 'view-device-id'));
+      const status = el('div', '', 'device-contact-status'), contact = el('div'), readings = el('div');
+      contact.append(el('div', 'Connection', 'muted small'), badge(connection.label, connection.connected ? 'good' : 'stale'), el('p', `Last device contact: ${connection.contact ? formatTime(connection.contact, location.timezone) : 'Never received'}${age}`, 'muted small'));
+      if (connection.contact) contact.lastChild.title = connection.contact;
+      readings.append(el('div', 'Readings', 'muted small'), badge(reading.label, reading.reporting && !reading.attention && !reading.needsCalibration && device.enabled ? 'good' : 'stale'));
+      if (reading.needsCalibration && device.enabled) readings.append(el('p', 'SPL readings need microphone calibration. Device contact is tracked separately.', 'muted small'));
+      if (!reading.needsCalibration || reading.latest) readings.append(el('p', `Last usable reading received: ${formatTime(reading.latest?.received_at, location.timezone)}`, 'muted small'));
+      status.append(contact, readings);
+      item.append(identity, status);
       devicesBody.append(item);
     }
   }
 
   function drawHistory() {
     const selectedMethod = method.value;
-    chartArea.replaceChildren(chartNode(rows, versions, selectedMethod, rangeStart, rangeEnd, location.timezone, fit.checked));
+    chartArea.replaceChildren(chartNode(rows, versions, selectedMethod, rangeStart, rangeEnd, location.timezone, fit.checked, ctx.devices));
     historyStatus();
     more.hidden = rows.length >= total;
     more.textContent = `Load ${Math.min(CHART_PAGE, Math.max(0, total - rows.length))} older readings`;
-    readingsBody.replaceChildren(rows.length ? table(['Measured at', 'Device / location', 'Sound level', 'Saved threshold', 'Evaluation'], measurementRows(rows, ctx, location.timezone), 'Readings at this location') : empty('No saved readings', 'There are no measurements in this time range.'));
+    readingsBody.replaceChildren(rows.length ? table(['Measured at', 'Device / location', 'Sound level', 'Saved threshold', 'Evaluation', 'Recording'], measurementRows(rows, ctx, location.timezone, player), 'Readings at this location') : empty('No saved readings', 'There are no measurements in this time range.'));
   }
 
   function historyStatus() {
@@ -487,7 +515,7 @@ async function locationView(container, route, ctx) {
         dailyTimer = setTimeout(loadDaily, 1800);
       }
       if (result.report?.status === 'failed') dailyBody.append(errorBox(result.report.error || result.report.last_error || 'The last summary calculation failed. Open Daily reports to try again.'));
-      for (const item of result.summaries || []) dailyBody.append(dailySummaryCard(item, result.timezone || location.timezone, true));
+      for (const item of result.summaries || []) dailyBody.append(dailySummaryCard(item, result.timezone || location.timezone, true, ctx.devices));
       if (!result.summaries?.length && !reportPending(result.report)) dailyBody.append(empty(result.report?.status === 'completed' ? 'No usable data' : 'No saved summary yet', 'Open Daily reports to generate a summary. Missing recordings are never treated as silence.'));
     } catch (error) { if (!disposed && !ctx.signal?.aborted) dailyBody.replaceChildren(errorBox(errorMessage(error))); }
   }
@@ -513,7 +541,12 @@ async function locationView(container, route, ctx) {
   }, changes => Object.values(locationChanges(changes, location.id)).some(Boolean));
   chartArea.append(el('p', 'Loading saved readings…', 'muted'));
   await Promise.all([loadSupporting(), loadHistory(), loadIncidents(), loadDaily()]);
-  return () => { disposed = true; generation++; clearTimeout(dailyTimer); stopLive(); };
+  const stopContacts = startDeviceContactMonitor({
+    api: (...args) => ctx.api(...args), signal: ctx.signal, contacts: deviceContacts,
+    now: () => ctx.serverNow?.() ?? Date.now(), onUpdate: renderDeviceStatuses,
+    onError: error => { if (!disposed && !ctx.signal?.aborted) contactFeedback.textContent = error ? 'Contact check unavailable; retrying. Times shown are the last confirmed contact.' : ''; },
+  });
+  return () => { disposed = true; generation++; clearTimeout(dailyTimer); stopLive(); stopContacts(); recordings.dispose(); player.dispose(); };
 }
 
 async function incidentsView(container, route, ctx) {
@@ -585,7 +618,10 @@ async function incidentView(container, route, ctx) {
   const summary = el('div', '', 'view-metric-grid');
   const identity = section('Incident record');
   const detailBody = el('div'); identity.append(detailBody);
-  const readings = section('Related readings', 'Measurements evaluated for this incident’s device, stream, and saved threshold.');
+  const incidentAudio = createIncidentAudio(ctx, { incidentId: route.id });
+  const readings = section('Related readings', 'Sound-level measurements used to evaluate this incident. A 1s measurement describes how the level was calculated. Listen to the whole incident using the saved audio and available context before and after it.');
+  const listenIncident = button('Listen to whole incident', () => incidentAudio.open(), 'primary');
+  const refreshReadings = button('Refresh readings', () => load(), 'secondary recording-refresh');
   const body = el('div');
   const feedback = el('div');
   const footer = el('div', '', 'view-pagination');
@@ -593,8 +629,9 @@ async function incidentView(container, route, ctx) {
   const previous = button('← Previous', () => { offset = Math.max(0, offset - PAGE_SIZE); load(); }, 'button secondary');
   const next = button('Next →', () => { offset += PAGE_SIZE; load(); }, 'button secondary');
   const pages = el('div', '', 'view-pagination-buttons'); pages.append(previous, next); footer.append(count, pages);
-  readings.append(feedback, body, footer);
-  container.append(title, summary, identity, readings);
+  const readingActions = el('div', '', 'incident-audio-actions'); readingActions.append(listenIncident, refreshReadings);
+  readings.append(feedback, readingActions, body, footer);
+  container.append(title, summary, incidentAudio.element, identity, readings);
   const load = coalesceAsync(async () => {
     const ownGeneration = ++generation;
     const requestedOffset = offset;
@@ -607,6 +644,7 @@ async function incidentView(container, route, ctx) {
       if (disposed || ctx.signal?.aborted || ownGeneration !== generation || requestedOffset !== offset) return;
       const timezone = record.location_snapshot?.timezone || ctx.locations.find(item => item.id === record.location_id)?.timezone || 'UTC';
       const name = record.location_snapshot?.name || locationName(ctx, record.location_id);
+      incidentAudio.setIncident(record);
       title.querySelector('h1').textContent = name;
       summary.replaceChildren(metric('Incident status', readable(record.status), record.ended_at ? `Ended ${formatTime(record.ended_at, timezone)}` : 'This event is still unresolved'), metric('Peak level', formatLevel(record.peak_db, record.threshold_type), `${record.breach_count} excessive reading(s)`), metric('Saved threshold', formatLevel(record.threshold_value, record.threshold_type), record.threshold_version ? `Revision ${record.threshold_version.revision} · ${record.threshold_version.interval_seconds}s` : 'Historical threshold snapshot'), metric('Duration', duration(record.started_at, record.ended_at), 'Elapsed incident window; not measured sound coverage'));
       const descriptions = el('dl', '', 'view-record-grid');
@@ -633,7 +671,7 @@ async function incidentView(container, route, ctx) {
   }, ctx.signal);
   const stopLive = liveRefresh(ctx, load, changes => changes?.metadata || changes?.incidents.has(route.id));
   await load();
-  return () => { disposed = true; generation++; stopLive(); };
+  return () => { disposed = true; generation++; stopLive(); incidentAudio.dispose(); };
 }
 
 async function reportsView(container, route, ctx) {
@@ -683,7 +721,7 @@ async function reportsView(container, route, ctx) {
       if (summaries.length) feedback.append(el('p', 'The results below are the previous saved version. The failed calculation did not replace them.', 'muted'));
     }
     if (report?.completed_at && !summaries.length) feedback.append(el('p', `Last calculation: ${formatTime(report.completed_at, timezone)}`, 'muted'));
-    for (const summary of summaries) body.append(dailySummaryCard(summary, timezone));
+    for (const summary of summaries) body.append(dailySummaryCard(summary, timezone, false, ctx.devices));
     if (!summaries.length && !reportPending(report)) body.append(empty(report?.status === 'completed' ? 'No usable data' : report?.status === 'failed' ? 'No completed summary' : 'No saved summary yet', report?.status === 'completed' ? 'No eligible measurements were found for this location and day. No zero sound level has been substituted.' : 'Choose Generate summary to calculate the stored recordings for this local date.'));
     if (report?.source_as_of) body.append(el('p', `Source data checked: ${formatTime(report.source_as_of, timezone)}. Recalculate to include late arrivals or reprocessed measurements.`, 'muted report-generated'));
     controls();

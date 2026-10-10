@@ -26,7 +26,7 @@ def ingest_recording(db, token, meta, source, *, audio_format="wav_pcm_s24le_mon
         staged = stage_audio(source, get_settings())
         existing = db.scalar(select(AudioChunk).where(AudioChunk.device_id == device.id, AudioChunk.device_chunk_id == meta.chunk_id))
         if existing:
-            if existing.checksum != staged.checksum or existing.captured_at != meta.captured_at or existing.session_id != meta.session_id or existing.sequence != meta.sequence:
+            if existing.checksum != staged.checksum or existing.captured_at != meta.captured_at or existing.session_id != meta.session_id or existing.sequence != meta.sequence or existing.capture_interval_ms != meta.capture_interval_ms:
                 raise HTTPException(409, "Chunk ID was already used with different bytes or metadata")
             device.last_contact_at = clock.now()
             db.commit()
@@ -35,6 +35,8 @@ def ingest_recording(db, token, meta, source, *, audio_format="wav_pcm_s24le_mon
         expected_width = 2 if audio_format == "wav_pcm_s16le_mono" else 3
         if info.sample_width != expected_width:
             raise AudioValidationError("WAV sample width does not match the upload contract")
+        if meta.capture_interval_ms is not None and meta.capture_interval_ms < info.duration_seconds * 1000:
+            raise AudioValidationError("Capture interval must not be shorter than the recording duration")
         assignment = assignment_at(db, device.id, meta.captured_at)
         if assignment is None:
             raise HTTPException(422, "No registered device assignment covers the capture timestamp")
@@ -49,6 +51,7 @@ def ingest_recording(db, token, meta, source, *, audio_format="wav_pcm_s24le_mon
         selected = rule or location
         row = AudioChunk(device_id=device.id, location_id=location.id, assignment_id=assignment.id, location_snapshot=jsonable_encoder(snapshot), device_chunk_id=meta.chunk_id, session_id=meta.session_id, sequence=meta.sequence, captured_at=meta.captured_at, received_at=clock.now(), duration_seconds=info.duration_seconds, sample_rate=info.sample_rate, audio_format=audio_format, checksum=staged.checksum, file_path=file_path, status="pending", threshold_value=selected.threshold_value, threshold_type=selected.threshold_type, interval_seconds=selected.interval_seconds, calibration=device.calibration)
         db.add(row)
+        row.capture_interval_ms = meta.capture_interval_ms
         db.flush()
         db.add(ProcessingJob(audio_chunk_id=row.id, status="pending", available_at=clock.now(),
                              created_at=clock.now(), updated_at=clock.now()))

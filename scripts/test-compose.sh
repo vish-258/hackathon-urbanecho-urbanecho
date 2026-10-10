@@ -9,6 +9,9 @@ TEST_ENV=$(mktemp .local/test-env.XXXXXX)
 TEST_PROJECT="noise-integration-$(date +%s)-$$"
 export COMPOSE_PROJECT_NAME="$TEST_PROJECT"
 export COMPOSE_FILE=compose.yaml:compose.test.yaml
+if [ "${CLASSIFICATION_TESTS:-0}" = "1" ]; then
+  COMPOSE_FILE="$COMPOSE_FILE:compose.classification-test.yaml"; export COMPOSE_FILE
+fi
 case "$(uname -m)" in arm64|aarch64) COMPOSE_FILE="$COMPOSE_FILE:compose.amd64.yaml"; export COMPOSE_FILE;; esac
 python3 - "$TEST_ENV" <<'PY'
 import secrets, sys

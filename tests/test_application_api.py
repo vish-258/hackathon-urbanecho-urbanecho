@@ -150,6 +150,7 @@ def test_application_static_containment_and_headers(client, monkeypatch, tmp_pat
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert "https://tile.openstreetmap.org" in response.headers["content-security-policy"]
+    assert "media-src 'self' blob:" in response.headers["content-security-policy"]
     assert client.get("/app/ui.mjs").headers["content-type"].startswith("text/javascript")
     assert client.get("/app/escape.js").status_code == 404
     assert client.get("/app/%2e%2e/private.js").status_code == 404

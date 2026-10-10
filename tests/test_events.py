@@ -324,6 +324,60 @@ def test_invalid_live_event_exposes_diagnostic_immediately_and_clears_on_valid_d
     assert valid['incident_status'] == 'recovering'  # One valid reading cannot resolve.
 
 
+def test_invalid_events_and_snapshots_share_eligible_reading_and_expiry(
+    client, admin_headers, settings, monkeypatch,
+):
+    from app import clock
+    from app.events import read_events
+    from tests.live_helpers import BASE, create_stream, put_reading
+    monkeypatch.setattr(settings, 'data_stale_seconds', 30)
+    current_time = BASE
+    monkeypatch.setattr(clock, 'now', lambda: current_time)
+    stream = create_stream(threshold=-30, method='dbfs_rms')
+    put_reading(stream, 0, -20)
+    initial = get_snapshot(client, admin_headers, location_id=str(stream.location_id))
+    expected_reading = {key: initial['items'][0]['streams'][0][key] for key in (
+        'measurement_value', 'measured_at', 'received_at', 'measurement_type', 'weighting',
+        'interval_seconds', 'calibration_status')}
+
+    current_time = BASE + timedelta(seconds=29)
+    put_reading(stream, 29, -1, result={'quality_status': 'clipped'})
+    invalid = read_events(initial['cursor'])[-1]
+    assert invalid['data']['data_status'] == 'invalid'
+    assert invalid['data']['measurement_value'] == -1  # Rejected observation stays in event history.
+    assert invalid['data']['eligible_reading'] == expected_reading
+    at_29 = get_snapshot(client, admin_headers, location_id=str(stream.location_id))
+    persisted = at_29['items'][0]['streams'][0]
+    assert persisted['data_status'] == 'invalid'
+    assert {key: persisted[key] for key in expected_reading} == expected_reading
+
+    # A new invalid sample after the cutoff must not revive the expired stream,
+    # even before a worker sweep or a snapshot request has run.
+    current_time = BASE + timedelta(seconds=31)
+    put_reading(stream, 31, -1, result={'quality_status': 'clipped'})
+    expired = read_events(at_29['cursor'])[-1]['data']
+    assert expired['data_status'] == 'stale'
+    assert expired['diagnostic'] == 'quality_clipped'
+    assert expired['eligible_reading'] == expected_reading
+    at_31 = get_snapshot(client, admin_headers, location_id=str(stream.location_id))
+    assert at_31['items'][0]['streams'][0]['data_status'] == 'stale'
+    assert at_31['incidents'][0]['status'] == 'active'
+
+    # Recovery still requires three contiguous eligible recordings.
+    cursor = at_31['cursor']
+    for second in (32, 33, 34):
+        current_time = BASE + timedelta(seconds=second)
+        put_reading(stream, second, -40)
+        updates = read_events(cursor)
+        latest = updates[-1]['data']
+        assert latest['data_status'] == 'fresh'
+        assert latest['diagnostic'] is None
+        assert latest['eligible_reading']['measurement_value'] == -40
+        assert latest['eligible_reading']['measured_at'] == current_time.isoformat()
+        assert latest['incident_status'] == ('resolved' if second == 34 else 'recovering')
+        cursor = updates[-1]['cursor']
+
+
 @pytest.mark.parametrize('age,expected_freshness', [(30, 'fresh'), (31, 'stale'), (120, 'stale')])
 def test_eligible_delayed_reading_commits_correct_freshness_without_transient_fresh_event(
     client, admin_headers, monkeypatch, age, expected_freshness,

@@ -133,3 +133,4 @@ class UploadMetadata(Input):
     captured_at: AwareDatetime
     session_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     sequence: int = Field(strict=True, ge=0, le=9223372036854775807)
+    capture_interval_ms: int | None = Field(default=None, strict=True, ge=1, le=3600000)

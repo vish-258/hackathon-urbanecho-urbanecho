@@ -152,13 +152,43 @@ test('live stream metadata keeps method and calibration attached to the rendered
 });
 test('invalid data stays distinguishable from stale until the freshness window expires', () => {
   const state = applySnapshot(initialState(), snapshot());
-  applyEvent(state, event('location.status_changed', {data_status: 'invalid',
-    measured_at: '2026-10-09T00:00:00Z', diagnostic: 'quality_clipped'}), `${epoch}:1`);
+  applyEvent(state, event('location.status_changed', {measured_at: '2026-10-09T00:00:00Z'}), `${epoch}:1`);
+  applyEvent(state, event('location.status_changed', {event_id:'evt-2', data_status: 'invalid',
+    measured_at: '2026-10-09T00:00:10Z', diagnostic: 'quality_clipped'}), `${epoch}:2`);
   ageData(state, Date.parse('2026-10-09T00:00:15Z'), 30);
   assert.equal(state.locations.get('loc-a').data_status, 'invalid');
   assert.equal(state.locations.get('loc-a').streams[0].diagnostic, 'quality_clipped');
   ageData(state, Date.parse('2026-10-09T00:00:31Z'), 30);
   assert.equal(state.locations.get('loc-a').data_status, 'stale');
+});
+
+test('legacy invalid replay preserves a known eligible reading and cannot revive stale data', () => {
+  const state = applySnapshot(initialState(), snapshot());
+  applyEvent(state, event('location.status_changed', {measured_at:'2026-10-09T00:00:00Z',
+    measurement_value:55, measurement_type:'spl_z_leq', weighting:'Z', calibration_status:'calibrated'}), `${epoch}:1`);
+  ageData(state, Date.parse('2026-10-09T00:00:31Z'), 30);
+  applyEvent(state, event('location.status_changed', {event_id:'evt-2', data_status:'invalid',
+    measured_at:'2026-10-09T00:00:31Z', measurement_value:-1, measurement_type:'dbfs_rms',
+    weighting:'none', calibration_status:'not_required', diagnostic:'measurement_type_mismatch'}), `${epoch}:2`);
+  const stream = state.locations.get('loc-a').streams[0];
+  assert.equal(stream.data_status,'stale');
+  assert.equal(stream.measured_at,'2026-10-09T00:00:00Z');
+  assert.equal(stream.measurement_value,55);
+  assert.equal(stream.measurement_type,'spl_z_leq');
+  assert.equal(stream.weighting,'Z');
+  assert.equal(stream.calibration_status,'calibrated');
+  assert.equal(stream.diagnostic,'measurement_type_mismatch');
+});
+
+test('legacy invalid replay without eligible history never invents a usable reading', () => {
+  const state = applySnapshot(initialState(), snapshot());
+  applyEvent(state, event('location.status_changed', {data_status:'invalid',
+    measured_at:'2026-10-09T00:00:29Z', diagnostic:'quality_clipped'}), `${epoch}:1`);
+  const stream = state.locations.get('loc-a').streams[0];
+  assert.equal(stream.data_status,'stale');
+  assert.equal(stream.measured_at,undefined);
+  assert.equal(stream.measurement_value,undefined);
+  assert.equal(stream.diagnostic,'quality_clipped');
 });
 
 test('valid measurement clears the previous invalid-data diagnostic', () => {

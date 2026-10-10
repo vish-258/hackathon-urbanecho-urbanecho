@@ -4,6 +4,7 @@ import uuid
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 import pytest
 from sqlalchemy import create_engine, text
 
@@ -141,7 +142,7 @@ def test_external_id_migration_preserves_existing_device_row(privileged, monkeyp
             after = dict(connection.execute(text("SELECT * FROM devices WHERE id=:device"), ids).mappings().one())
             assert after.pop("external_id") is None
             assert after == before
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005_device_external_id"
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == ScriptDirectory.from_config(configuration).get_current_head()
     finally:
         if migrated is not None:
             migrated.dispose()

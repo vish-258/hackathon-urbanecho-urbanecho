@@ -66,6 +66,7 @@ def test_upgrade_preserves_original_snapshots_and_marks_legacy_history(privilege
         with migration_engine.connect() as connection:
             chunk = connection.execute(text('SELECT * FROM audio_chunks WHERE id=:chunk'), values).mappings().one()
             assert chunk['legacy_ingestion'] is True
+            assert chunk['capture_interval_ms'] is None
             assert chunk['file_path'] == 'original/unchanged.wav' and chunk['checksum'] == 'a' * 64
             assert chunk['threshold_value'] == 60 and chunk['location_id'] == previous_location_id
             assert chunk['location_snapshot']['longitude'] == 88

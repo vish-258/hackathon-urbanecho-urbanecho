@@ -16,7 +16,7 @@ HEADERS = {
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "connect-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; "
+        "connect-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; media-src 'self' blob:; "
         "font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     ),
 }

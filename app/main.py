@@ -8,10 +8,11 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials
 from geoalchemy2 import Geography, Geometry
 from pydantic import AwareDatetime, ValidationError
 from sqlalchemy import String, cast, func, or_, select, text
@@ -19,7 +20,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.auth import authenticate_device, is_admin, require_admin, token_hash, token_value
+from app.auth import authenticate_device, bearer, is_admin, require_admin, token_hash, token_value
 from app.config import get_settings
 from app.db import get_db, wait_for_database
 from app.models import AudioChunk, Device, Incident, Location, Measurement, ProcessingJob, MeasurementEvaluation, ThresholdVersion, DurableEvent, EventClock
@@ -33,6 +34,11 @@ from app.events import emit_event, lock_event_clock
 from app.live_api import router as live_router
 from app.application_api import router as application_router
 from app.daily_api import router as daily_router
+from app.daily import source_kind
+from app.classification_api import router as classification_router
+from app.incident_analysis_api import router as incident_analysis_router
+from app.recording_groups import router as recording_groups_router
+from app.classification_jobs import classifications_for
 from app.storage import resolve_audio_path
 
 log = logging.getLogger(__name__)
@@ -123,6 +129,7 @@ def measurement_dicts(db, rows):
         return []
     chunks = {row.id: row for row in db.scalars(select(AudioChunk).where(
         AudioChunk.id.in_({item.audio_chunk_id for item in rows})))}
+    classifications = classifications_for(db, chunks)
     evaluations = {row.measurement_id: row for row in db.scalars(select(MeasurementEvaluation).where(
         MeasurementEvaluation.measurement_id.in_([item.id for item in rows])))}
     rule_ids = {item.threshold_version_id for item in evaluations.values() if item.threshold_version_id}
@@ -137,6 +144,9 @@ def measurement_dicts(db, rows):
             "device_id": chunk.device_id, "location_id": chunk.location_id,
             "location_snapshot": chunk.location_snapshot, "captured_at": chunk.captured_at,
             "duration_seconds": chunk.duration_seconds,
+            "capture_interval_ms": chunk.capture_interval_ms,
+            "source_kind": source_kind(chunk, row),
+            "classification": classifications[chunk.id],
             "threshold_value": rule.threshold_value if rule else chunk.threshold_value,
             "threshold_type": rule.threshold_type if rule else chunk.threshold_type,
             "threshold_version": model_dict(rule) if rule else None,
@@ -153,6 +163,25 @@ def incident_dicts(db, rows):
     return [{**model_dict(row), "device_external_id": codes.get(row.device_id)} for row in rows]
 
 
+def recording_dicts(db, rows):
+    """List original captures independently of whether usable levels exist yet."""
+    if not rows:
+        return []
+    codes = dict(db.execute(select(Device.id, Device.external_id).where(
+        Device.id.in_({row.device_id for row in rows}))).all())
+    classifications = classifications_for(db, [row.id for row in rows])
+    fields = ("id", "device_id", "location_id", "location_snapshot", "captured_at",
+              "received_at", "duration_seconds", "capture_interval_ms", "sample_rate", "audio_format",
+              "status", "threshold_type")
+    return [{**{field: getattr(row, field) for field in fields},
+             "device_external_id": codes.get(row.device_id), "source_kind": source_kind(row),
+             "classification": classifications[row.id],
+             # Presence is capture-time metadata, not a claim of acoustic accuracy.
+             "calibration_present": row.calibration is not None,
+             "calibration_version": (row.calibration or {}).get("version")}
+            for row in rows]
+
+
 @asynccontextmanager
 async def lifespan(app):
     wait_for_database()
@@ -164,12 +193,17 @@ async def lifespan(app):
 def create_app():
     app = FastAPI(title="Environmental Noise Monitor", version="1.0.0", lifespan=lifespan,
                   description="Durable PCM24 WAV and raw PCM16 compatibility uploads, spatial location queries, and versioned digital/calibrated processing. Admin and device endpoints use separate bearer credentials.")
+    app.state.local_audio_playback = True
     app.add_middleware(UploadSizeLimit)
     # Register /locations/status before the dynamic location UUID route.
     app.include_router(live_router)
     app.include_router(application_router)
     app.include_router(daily_router)
+    app.include_router(classification_router)
+    app.include_router(incident_analysis_router)
     app.include_router(pcm_router)
+    # Preserve the legacy /recordings/{key}.wav route before the group UUID route.
+    app.include_router(recording_groups_router)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request, exc):
@@ -374,6 +408,33 @@ def create_app():
         result = ingest_recording(db, token, meta, file.file)
         return JSONResponse(jsonable_encoder(result), status_code=200 if result["duplicate"] else 202)
 
+    @app.get("/audio", tags=["audio"])
+    def recordings(db: DB, admin: Admin, device_id: UUID | None = None, location_id: UUID | None = None,
+                   since: AwareDatetime | None = None, until: AwareDatetime | None = None,
+                   received_until: AwareDatetime | None = None,
+                   limit: Limit = 50, offset: Offset = 0):
+        """Saved WAV captures, including pending and ineligible measurements.
+
+        since/until are inclusive capture bounds. Freeze received_until too when
+        paging so late historical uploads cannot shift the selected snapshot.
+        Location uses the immutable assignment, not today's device mapping.
+        """
+        if since and until and since > until:
+            raise HTTPException(422, "since must not be after until")
+        query = select(AudioChunk)
+        if device_id:
+            query = query.where(AudioChunk.device_id == device_id)
+        if location_id:
+            query = query.where(AudioChunk.location_id == location_id)
+        if since:
+            query = query.where(AudioChunk.captured_at >= since)
+        if until:
+            query = query.where(AudioChunk.captured_at <= until)
+        if received_until:
+            query = query.where(AudioChunk.received_at <= received_until)
+        return page(db, query.order_by(AudioChunk.captured_at.desc(), AudioChunk.id), limit, offset,
+                    serialize_many=lambda rows: recording_dicts(db, rows))
+
     def authorized_chunk(db, chunk_id, token):
         row = require_row(db, AudioChunk, chunk_id)
         if not is_admin(token):
@@ -386,15 +447,25 @@ def create_app():
         job = db.scalar(select(ProcessingJob).where(ProcessingJob.audio_chunk_id == row.id))
         results = db.scalars(select(Measurement).where(Measurement.audio_chunk_id == row.id).order_by(Measurement.received_at, Measurement.id)).all()
         return {**model_dict(row, ("file_path",)), "job": model_dict(job, ("lease_token",)) if job else None,
+                "classification": classifications_for(db, [row.id])[row.id],
                 "measurements": measurement_dicts(db, results)}
 
     @app.get("/audio/{chunk_id}/file", tags=["audio"])
-    def download_audio(chunk_id: UUID, db: DB, token: Token):
-        row = authorized_chunk(db, chunk_id, token)
+    def download_audio(chunk_id: UUID, db: DB, request: Request,
+                       credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
+        if credentials is not None:
+            # Explicit bearer credentials retain precedence over local cookies.
+            row = authorized_chunk(db, chunk_id, credentials.credentials)
+        else:
+            if not request.app.state.local_audio_playback:
+                raise HTTPException(401, "Bearer token required", headers={"WWW-Authenticate": "Bearer"})
+            require_admin(request, None)
+            row = require_row(db, AudioChunk, chunk_id)
         path = resolve_audio_path(row.file_path, get_settings())
         if not path.is_file():
             raise HTTPException(503, "Original audio unavailable; restore storage from backup")
-        return FileResponse(path, media_type="audio/wav", filename=f"{row.id}.wav", headers={"ETag": f'"{row.checksum}"'})
+        return FileResponse(path, media_type="audio/wav", filename=f"{row.id}.wav",
+                            headers={"ETag": f'"{row.checksum}"', "Cache-Control": "private, no-store"})
 
     @app.get("/measurements", tags=["measurements"])
     def measurements(db: DB, admin: Admin, device_id: UUID | None = None, location_id: UUID | None = None,

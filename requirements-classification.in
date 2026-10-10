@@ -1,0 +1,6 @@
+# Only the isolated classifier image installs these; the API stays lightweight.
+# Match the one shared runtime package to the application lock file.
+typing-extensions==4.16.0
+ai-edge-litert==2.3.0
+numpy==2.5.3
+scipy==1.18.1
