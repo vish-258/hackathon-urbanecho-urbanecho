@@ -35,14 +35,15 @@ test('Management keeps section controls mounted and exposes the selected section
  assert.equal(locations.attributes['aria-pressed'],'true');
 });
 
-async function setup(t,locate){
+async function setup(t,locate,{readOnly=false}={}){
  const previous=globalThis.document;
  globalThis.document={createElement:tag=>new Element(tag)};
  t.after(()=>{globalThis.document=previous;});
  const controller=new AbortController(),requests=[],contactRequests=[],notices=[],listeners=new Set();
  let contactHandler,serverNow=Date.parse('2026-10-10T01:02:10Z');
  const location={id:'bench',name:'Bench',latitude:0,longitude:0,timezone:'Asia/Kolkata',configuration_version:'saved-version'};
- const ctx={locations:[location],devices:['a','b'].map(id=>({id,external_id:`ESP-${id}`,location_id:'bench',current_assignment_id:`assignment-${id}`,enabled:true,microphone_model:'INMP441'})),state:{locations:new Map(),incidents:new Map()},signal:controller.signal,
+ if(readOnly)location.current_threshold={threshold_type:'dbfs_rms',threshold_value:-30,interval_seconds:1,recovery_count:3};
+ const ctx={readOnly,locations:[location],devices:['a','b'].map(id=>({id,external_id:`ESP-${id}`,location_id:'bench',current_assignment_id:`assignment-${id}`,enabled:true,microphone_model:'INMP441'})),state:{locations:new Map(),incidents:new Map()},signal:controller.signal,
   serverNow:()=>serverNow,dataStaleSeconds:()=>30,
   onLive(listener){listeners.add(listener);return()=>listeners.delete(listener);},
   async api(path,options){if(path.startsWith('/devices?')){contactRequests.push({path,...options});return contactHandler?contactHandler(path,options):{items:ctx.devices.map(d=>({id:d.id,last_contact_at:d.last_contact_at})),total:ctx.devices.length};}requests.push({path,...options});Object.assign(location,JSON.parse(options.body));},async refresh(){},notify(message){notices.push(message);}};
@@ -51,7 +52,7 @@ async function setup(t,locate){
  t.after(cleanup);
  const button=label=>root.all().find(x=>x.tag==='button'&&x.textContent===label);
  const field=label=>root.all().find(x=>x.tag==='label'&&x.children[0].textContent===label)?.children[1];
- await button('Edit').click();
+ if(!readOnly)await button('Edit').click();
  return {root,controller,requests,contactRequests,setContactHandler:handler=>{contactHandler=handler;},setServerNow:value=>{serverNow=value;},notices,button,field,cleanup,ctx,listeners,emit:changes=>{for(const listener of listeners)listener(changes);}};
 }
 
@@ -445,4 +446,28 @@ test('registration refresh warnings and credential copy outcomes stay in the cre
  rejectCopy=true;await f.button('Copy token').click();
  assert.match(provision.textContent,/Select and copy the device credential/);
  assert.deepEqual(f.notices,[]);
+});
+
+
+test('public Management shows settings and device contact without mutation or credential controls',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const f=await setup(t,async()=>{throw Error('Guest must not request a position');},{readOnly:true});
+ assert.match(f.root.textContent,/Public demo · Settings are read-only\./);
+ assert.match(f.root.textContent,/Bench/);
+ assert.match(f.root.textContent,/0\.00000, 0\.00000/);
+ const noEditing=()=>{
+  assert.equal(f.root.all().some(node=>['form','input','select'].includes(node.tag)),false);
+  assert.equal(f.root.all().some(node=>node.tag==='button'&&/Edit|Create|Register|Save|token|current location/i.test(node.textContent)),false);
+ };
+ noEditing();
+ await f.button('Devices').click();
+ assert.match(f.root.textContent,/ESP-a/);assert.match(f.root.textContent,/ESP-b/);
+ noEditing();
+ await Promise.resolve();
+ assert.equal(f.contactRequests.length,1);
+ assert.ok(f.contactRequests.every(request=>!request.method||request.method==='GET'));
+ await f.button('Thresholds').click();
+ assert.match(f.root.textContent,/-30\.00 dBFS/);
+ assert.match(f.root.textContent,/3 consecutive normal readings to recover/);
+ noEditing();assert.equal(f.requests.length,0);
 });

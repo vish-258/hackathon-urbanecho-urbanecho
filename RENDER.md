@@ -1,6 +1,6 @@
 # Free Render + Supabase deployment
 
-**Live application: [UrbanEcho](https://urban-echo-uz15.onrender.com/app).** Deployed revision `d73e537` passed hosted verification on 10 October 2026. Sign in using the private deployment `ADMIN_TOKEN`. The cloud has its own fresh dataset, including one clearly labelled **SIMULATED** verification location/device and three synthetic recordings; local data and device credentials were not migrated. The first visit after idle sleep can take about a minute.
+**Live application: [UrbanEcho](https://urban-echo-uz15.onrender.com/app).** Deployed revision `d73e537` passed hosted verification on 10 October 2026. The published SIMULATED location opens directly without sign-in; administrator changes still require the private deployment `ADMIN_TOKEN`. The cloud has its own fresh dataset, including one clearly labelled **SIMULATED** verification location/device, six synthetic recordings and one resolved incident; local data and device credentials were not migrated. The first visit after idle sleep can take about a minute.
 
 This package runs the API, measurement worker and incident classifier together on one **free Render web service**. A dedicated free Supabase project stores PostgreSQL/PostGIS data and immutable originals in a private Storage bucket. The service's `/tmp/urbanecho-audio-cache` is disposable; it is never the only copy of an accepted recording. No local database, recording or device credential is copied to the cloud.
 
@@ -40,7 +40,7 @@ Before opening the public port, the launcher serializes database preparation wit
 
 Startup verifies that the Storage bucket exists and is private. It then starts all three processes as UID/GID 10001 with the migration credentials and bootstrap fields removed from their environment. Any unexpected child exit stops the whole service. Existing local filesystem and Railway deployments retain their separate launchers and defaults.
 
-Open the assigned HTTPS Render URL at `/app`, then use `ADMIN_TOKEN` to sign in. Provision fresh cloud devices through that app. Never publish administrator or Storage credentials in a submission link.
+Open the assigned HTTPS Render URL at `/app`. For a public demo, set `PUBLIC_DEMO_LOCATION_ID` to the UUID of one deliberately selected demonstration location. That publishes its location/device metadata, readings, incidents, saved reports and audio for anonymous read-only use; only choose data intended for public viewing. Other locations remain private. Leave this setting unset to require sign-in at entry. Use **Admin sign in** and `ADMIN_TOKEN` to provision devices, change settings or generate reports. Never publish administrator or Storage credentials in a submission link.
 
 ## Verification
 
@@ -55,3 +55,9 @@ Run launcher tests with `python -m pytest -q tests/test_render_runtime.py tests/
 The actual Render service completed Supabase role/bootstrap setup, migration `0009_recording_groups` and private-bucket verification. The public HTTPS application passed authentication and disabled-local-session checks, actual model readiness, three synthetic uploads and their measurements, byte-exact original downloads, an incident with two recovery readings, and playable incident audio with a saved model estimate. The synthetic tone was classified as **Other**; this verifies execution, not real-world sound recognition accuracy. Synthetic data remains labelled and retained for inspection. Idle sleep/wake behavior and concurrent-load capacity have not been verified.
 
 A subsequent **Restart service** replaced the running Render instance. Read-only checks against the same saved records passed again: all three original downloads had identical SHA-256 checksums, the incident and model result remained available, and its assembled audio played without any new uploads. The hosted browser also reconnected to the replacement instance.
+
+Finally, three fresh, consecutive quiet recordings completed valid recovery of that synthetic incident. The current fixture retains all **six originals**, each verified against its SHA-256 checksum. The resolved incident has a final, nonprovisional model result and its revision-bound audio download passed as a six-second PCM24 WAV. The time gap between the original smoke test and these recovery readings remains explicit in the incident coverage; it is not filled with invented silence. The original smoke and restart states remain unchanged as dated evidence.
+
+## Public demo access
+
+`GET /app/access` lets the browser open the configured public location automatically. Every supported public list applies its location filter before pagination, and detail/playback requests reject records belonging to other locations. Live events use the same location scope. The frontend hides mutation controls for visitors, while backend administrator dependencies continue to enforce write protection. Neither the administrator token nor the Supabase key is sent to anonymous browsers. The current hosted fixture is the explicitly published SIMULATED location; local recordings remain separate.

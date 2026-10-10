@@ -5,8 +5,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 
-from app.auth import issue_local_session, require_admin
+from app.auth import bearer, has_local_session, issue_local_session, require_admin
+from fastapi.security import HTTPAuthorizationCredentials
 from app.config import get_settings
+from app.read_access import Read
 
 router = APIRouter()
 STATIC = Path(__file__).with_name("static") / "application"
@@ -40,6 +42,19 @@ def local_session(request: Request, response: Response):
     return {"access": "local"}
 
 
+@router.get("/app/access", tags=["application"])
+def application_access(request: Request, response: Response,
+                       credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
+    response.headers["Cache-Control"] = "no-store"
+    if "authorization" in request.headers and credentials is None:
+        raise HTTPException(403, "Administrator permission required")
+    if credentials is not None or has_local_session(request):
+        require_admin(request, credentials)
+        return {"access": "admin", "read_only": False}
+    public = get_settings().public_demo_location_id is not None
+    return {"access": "public" if public else "admin", "read_only": public}
+
+
 @router.get("/app/{asset:path}", include_in_schema=False)
 def application_asset(asset: str):
     root = STATIC.resolve()
@@ -53,11 +68,11 @@ def application_asset(asset: str):
 
 
 @router.get("/capabilities", tags=["application"])
-def capabilities(admin: Annotated[None, Depends(require_admin)]):
+def capabilities(access: Read):
     return {
         "daily_summaries": {
             "available": True,
-            "generation_available": True,
+            "generation_available": not access.read_only,
             "endpoint": "/daily-summaries",
             "generation_endpoint": "/daily-summaries/generate",
             "reason": "Saved local-calendar-day summaries use sound-energy and duration weighting. "

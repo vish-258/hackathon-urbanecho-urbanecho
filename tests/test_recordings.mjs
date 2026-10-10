@@ -26,13 +26,13 @@ class Element {
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 const recording = (id = 'audio-1') => ({ id, device_id: 'device-1', captured_at: '2026-10-10T01:02:03Z', duration_seconds: 1, calibration_present: false, location_snapshot: { name: 'Room2', timezone: 'Asia/Kolkata' }, status: 'completed' });
 
-function fixture(t) {
+function fixture(t, { readOnly = false } = {}) {
   const original = globalThis.document;
   const elements = [];
   globalThis.document = { activeElement: null, createElement(tag) { const node = new Element(tag); elements.push(node); return node; }, querySelectorAll: selector => elements.filter(node => node.isConnected && selector === '[data-recording-id]' && Object.hasOwn(node.attributes, 'data-recording-id')) };
   t.after(() => { globalThis.document = original; });
   const controller = new AbortController(), calls = [], created = [], revoked = [];
-  const ctx = { signal: controller.signal, devices: [{ id: 'device-1', external_id: 'ESP-MAC1' }], serverNow: () => Date.parse('2026-10-10T01:02:30Z'),
+  const ctx = { readOnly, signal: controller.signal, devices: [{ id: 'device-1', external_id: 'ESP-MAC1' }], serverNow: () => Date.parse('2026-10-10T01:02:30Z'),
     async audioFile(id, { signal }) { calls.push({ id, signal }); return new Blob(['audio'], { type: 'audio/wav' }); },
   };
   const urls = { createObjectURL(blob) { created.push(blob); return `blob:saved-${created.length}`; }, revokeObjectURL(url) { revoked.push(url); } };
@@ -426,4 +426,17 @@ test('legacy disabled classifiers do not poll and unavailable classifiers retry 
   const source = f.audio.src;
   t.mock.timers.tick(29999); await settle(); assert.equal(calls, 0);
   t.mock.timers.tick(1); await settle(); assert.equal(calls, 1); assert.match(f.player.element.textContent, /Animal · model estimate/); assert.equal(f.audio.src, source);
+});
+
+
+test('public recordings keep playback and saved-estimate refresh but omit classification retry', async t => {
+  const f = fixture(t, { readOnly: true }), requests = [];
+  f.ctx.api = async (path, options) => { requests.push({ path, ...options }); return soundEstimate('other'); };
+  await f.player.listen({ ...recording(), classification: { status: 'failed', worker_status: 'ready' } });
+  assert.equal(f.player.element.all().some(node => node.tag === 'button' && node.textContent === 'Retry sound classification'), false);
+  const source = f.audio.src;
+  await f.player.element.all().find(node => node.tag === 'button' && node.textContent === 'Refresh sound estimate').click();
+  assert.equal(f.audio.src, source); assert.equal(f.calls.length, 1);
+  assert.equal(requests.length, 1); assert.equal(requests[0].path, '/audio/audio-1/classification');
+  assert.equal(requests[0].method, undefined);
 });

@@ -12,6 +12,7 @@ from app.db import get_db
 from app.incident_analysis_jobs import analysis_dict, enqueue_incident, get_analysis
 from app.incident_audio import prepare_playback
 from app.models import Incident
+from app.read_access import Read
 
 router = APIRouter(tags=["incident audio"])
 DB = Annotated[Session, Depends(get_db)]
@@ -26,8 +27,12 @@ def require_incident(db, incident_id):
 
 
 @router.get("/incidents/{incident_id}/analysis")
-def analysis(incident_id: UUID, db: DB, admin: Admin):
-    return analysis_dict(db, require_incident(db, incident_id))
+def analysis(incident_id: UUID, db: DB, access: Read):
+    incident = require_incident(db, incident_id)
+    access.require_location(incident.location_id)
+    row = get_analysis(db, incident_id)
+    access.require_manifest(db, row.manifest if row else None)
+    return analysis_dict(db, incident, row)
 
 
 @router.post("/incidents/{incident_id}/analysis", status_code=202)
@@ -42,10 +47,11 @@ def recalculate(incident_id: UUID, db: DB, admin: Admin):
 
 
 @router.get("/incidents/{incident_id}/audio/file")
-def audio(incident_id: UUID, db: DB, admin: Admin,
+def audio(incident_id: UUID, db: DB, access: Read,
           revision: Annotated[str | None, Query(pattern=r"^[a-f0-9]{64}$")] = None):
-    require_incident(db, incident_id)
+    access.require_location(require_incident(db, incident_id).location_id)
     row = get_analysis(db, incident_id)
+    access.require_manifest(db, row.manifest if row else None)
     if row is None or not row.manifest or not row.manifest.get("available"):
         raise HTTPException(409, "Incident audio is not available yet")
     if revision is not None and revision != row.revision:

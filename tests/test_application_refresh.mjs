@@ -375,3 +375,21 @@ test('related readings open whole incident audio without exposing one-second cli
   assert.equal(audio.src, source); assert.equal(files.length, 1); assert.deepEqual(rawFiles, []);
   cleanup(); assert.equal(audio.src, '');
 });
+
+
+test('public daily reports allow saved refresh without generation controls or editing instructions', async t => {
+  useDOM(t);
+  const { ctx, requests } = fixture(); ctx.readOnly = true;
+  const methods = [], api = ctx.api;
+  ctx.api = (path, options) => { methods.push(options?.method || 'GET'); return api(path, options); };
+  const root = new Element('main');
+  const cleanup = await mountView(root, { page: 'reports', params: new URLSearchParams('location=selected&date=2026-10-08') }, ctx);
+  t.after(cleanup);
+  assert.equal(root.all().some(node => node.tag === 'button' && /Generate|Recalculate/.test(node.textContent)), false);
+  assert.match(root.textContent, /No saved summary is available for this day/);
+  assert.doesNotMatch(root.textContent, /Choose Generate|Recalculate to/);
+  const refresh = root.all().find(node => node.tag === 'button' && node.textContent === 'Refresh saved results');
+  assert.ok(refresh); await refresh.click();
+  assert.equal(requests.filter(path => path.startsWith('/daily-summaries?')).length, 2);
+  assert.deepEqual(methods, ['GET', 'GET']);
+});

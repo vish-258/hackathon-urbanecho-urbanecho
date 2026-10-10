@@ -5,9 +5,9 @@ import {readFileSync} from 'node:fs';
 // Exercise the application's real request function without starting its UI/SSE.
 const source = readFileSync(new URL('../app/static/application/app.mjs', import.meta.url), 'utf8');
 const requestFunction = source.slice(source.indexOf('async function api('), source.indexOf('async function allPages('));
-function requestHarness(fetch, {localAccess = false, localSession = async () => {}, headers = {Authorization: 'Bearer test-only'}} = {}) {
-  return new Function('fetch', 'localAccess', 'localSession', 'accessHeaders', 'controller', `${requestFunction}; return api;`)(
-    fetch, localAccess, localSession, () => headers, new AbortController());
+function requestHarness(fetch, {publicAccess = false, localAccess = false, localSession = async () => {}, headers = {Authorization: 'Bearer test-only'}} = {}) {
+  return new Function('fetch', 'publicAccess', 'localAccess', 'localSession', 'accessHeaders', 'controller', `${requestFunction}; return api;`)(
+    fetch, publicAccess, localAccess, localSession, () => headers, new AbortController());
 }
 
 test('audio uses authenticated same-origin fetch and returns original bytes as a Blob', async () => {

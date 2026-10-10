@@ -16,6 +16,7 @@ from app.auth import require_admin
 from app.daily_jobs import enqueue_report
 from app.db import get_db
 from app.models import DailyReport, DailySummary, Location
+from app.read_access import Read
 
 router = APIRouter(prefix="/daily-summaries", tags=["daily summaries"])
 DB = Annotated[Session, Depends(get_db)]
@@ -74,8 +75,9 @@ def envelope(session: Session, location: Location, day: date,
 
 
 @router.get("")
-def get_daily_summary(db: DB, admin: Admin, location_id: UUID,
+def get_daily_summary(db: DB, access: Read, location_id: UUID,
                       reporting_date: Annotated[date | None, Query()] = None):
+    access.require_location(location_id)
     db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
     location = _location(db, location_id)
     return envelope(db, location, _date(db, location, reporting_date))
@@ -98,9 +100,10 @@ def generate_daily_summary(body: GenerateDailyReport, db: DB, admin: Admin):
 
 
 @router.get("/jobs/{report_id}")
-def get_daily_job(report_id: UUID, db: DB, admin: Admin):
+def get_daily_job(report_id: UUID, db: DB, access: Read):
     db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
     report = db.get(DailyReport, report_id)
     if report is None:
         raise HTTPException(404, "Daily report not found")
+    access.require_location(report.location_id)
     return envelope(db, _location(db, report.location_id), report.reporting_date, report)

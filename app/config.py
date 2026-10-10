@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 from typing import Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
     # replacement for administrator sign-in on a shared or public deployment.
     local_browser_access: bool = False
     local_browser_port: int = Field(default=8000, ge=1, le=65535)
+    # Explicitly publish one demonstration location; every other location and
+    # all administrative actions retain their existing authentication boundary.
+    public_demo_location_id: UUID | None = None
     audio_root: Path = Path("/data/audio")
     audio_storage_backend: Literal["filesystem", "supabase"] = "filesystem"
     supabase_url: str | None = None

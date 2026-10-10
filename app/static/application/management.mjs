@@ -8,7 +8,8 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
  const cancelLocation=()=>{formController?.abort();stopContacts();stopContacts=()=>{};};
  const stopUpdates=()=>{cancelLocation();stopLive();deviceStatusCells.clear();};
  ctx.signal.addEventListener('abort',stopUpdates,{once:true});
- const heading=el('div','','page-heading');const headingText=el('div');headingText.append(el('h1','Management'),el('p','Manage the places, devices, and rules behind your monitoring.'));heading.append(headingText);container.append(heading);
+ const heading=el('div','','page-heading');const headingText=el('div');headingText.append(el('h1','Management'),el('p',ctx.readOnly?'View the places, devices, and rules in this demonstration.':'Manage the places, devices, and rules behind your monitoring.'));heading.append(headingText);container.append(heading);
+ if(ctx.readOnly)container.append(el('p','Public demo · Settings are read-only.','notice'));
  const tabs=el('div','','tabbar'),body=el('div');container.append(tabs,body);
  const choices=[['locations','Locations'],['devices','Devices'],['thresholds','Thresholds']];
  tabs.setAttribute('role','group');tabs.setAttribute('aria-label','Management sections');
@@ -17,7 +18,7 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
  function paintTabs(){for(const[key,control]of tabButtons){control.className=`button ${tab===key?'active':''}`;control.setAttribute('aria-pressed',String(tab===key));}}
  function render(){cancelLocation();deviceStatusCells.clear();formController=new AbortController();paintTabs();body.replaceChildren();if(tab==='locations')locations();if(tab==='devices')devices();if(tab==='thresholds')thresholds();}
  function confirmInline(message,target){const line=el('p',message,'muted small');line.setAttribute('role','status');target?.replaceChildren(line);}
- async function submit(form,action,success,keepEditing=null){const feedback=form.querySelector('.feedback');feedback.replaceChildren();const btn=form.querySelector('[type=submit]');btn.disabled=true;try{await action();await ctx.refresh();editing=keepEditing;render();confirmInline(success,body.querySelector('.feedback'));}catch(err){feedback.append(errorBox(err.message));}finally{btn.disabled=false;}}
+ async function submit(form,action,success,keepEditing=null){if(ctx.readOnly)return;const feedback=form.querySelector('.feedback');feedback.replaceChildren();const btn=form.querySelector('[type=submit]');btn.disabled=true;try{await action();await ctx.refresh();editing=keepEditing;render();confirmInline(success,body.querySelector('.feedback'));}catch(err){feedback.append(errorBox(err.message));}finally{btn.disabled=false;}}
  function formShell(title,description){const p=el('section','','panel management-form'),inner=el('div','','panel-body'),f=el('form'),heading=el('h2',title);heading.id='management-form-title';heading.tabIndex=-1;p.setAttribute('aria-labelledby',heading.id);inner.append(heading,el('p',description,'muted small'));f.append(el('div','','feedback'));inner.append(f);p.append(inner);return{p,f};}
  function focusForm(){const title=body.querySelector('#management-form-title');title?.focus({preventScroll:true});title?.scrollIntoView({block:'nearest',behavior:globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});}
  function saveButton(f,label){const actions=el('div','','form-actions'),save=button(label,null,'primary');save.type='submit';actions.append(save);if(editing)actions.append(button('Cancel',()=>{editing=null;render()}));f.append(actions);}
@@ -47,10 +48,11 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
   for(const loc of ctx.locations){
    const row=el('div','','management-item'),text=el('div');
    text.append(el('h3',loc.name),el('p',`${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)} · ${loc.timezone}`),el('p',formatLevel(loc.current_threshold?.threshold_value,loc.current_threshold?.threshold_type)));
-   const edit=button('Edit',()=>{editing=loc.id;render();focusForm()});edit.setAttribute('aria-label',`Edit location ${loc.name}`);row.append(text,edit);rows.append(row);
+   row.append(text);if(!ctx.readOnly){const edit=button('Edit',()=>{editing=loc.id;render();focusForm()});edit.setAttribute('aria-label',`Edit location ${loc.name}`);row.append(edit);}rows.append(row);
   }
-  if(!ctx.locations.length)rows.append(empty('No locations yet','Create your first monitoring location.'));
+  if(!ctx.locations.length)rows.append(empty('No locations yet',ctx.readOnly?'No public demonstration location is available yet.':'Create your first monitoring location.'));
   list.append(rows);layout.append(list);
+  if(ctx.readOnly)return;
   const loc=ctx.locations.find(l=>l.id===editing),{p,f}=formShell(loc?'Edit location':'Create location',loc?'Changes apply from now. Previous recordings keep their original location details. An open incident on an old assignment will close as an assignment change when the next eligible reading arrives.':'Choose a location and its first noise threshold.');
   const currentForm=formController,grid=el('div','','form-grid');
   const name=input('text',loc?.name||'',{required:true,maxLength:200});
@@ -138,7 +140,7 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
   const wrap=el('div','','view-table-wrap');wrap.tabIndex=0;wrap.setAttribute('role','region');wrap.setAttribute('aria-label','Device IDs and assigned geographic locations');
   const table=el('table','','view-table'),head=el('thead'),header=el('tr'),rows=el('tbody');
   table.append(el('caption','Device IDs and assigned geographic locations','sr-only'));
-  for(const title of ['Device ID','Location','Coordinates','Status','Mapping']){const th=el('th',title);th.scope='col';header.append(th);}head.append(header);
+  for(const title of ['Device ID','Location','Coordinates','Status',...(!ctx.readOnly?['Mapping']:[])]){const th=el('th',title);th.scope='col';header.append(th);}head.append(header);
   for(const d of ctx.devices){
    const row=el('tr'),identity=el('td'),place=el('td'),coordinates=el('td'),status=el('td','','device-contact-status'),actions=el('td');
    place.setAttribute('data-label','Location');coordinates.setAttribute('data-label','Coordinates');
@@ -147,12 +149,13 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
    place.textContent=loc?.name||'Unassigned';
    coordinates.append(el('div',loc?`${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}`:'—'),el('small',loc?.timezone||'','muted'));
    deviceStatusCells.set(d.id,{status,place,coordinates});
-   const edit=button('Edit mapping',()=>{editing=d.id;render();focusForm()});edit.setAttribute('aria-label',`Edit mapping for ${d.external_id||d.id}`);actions.append(edit);row.append(identity,place,coordinates,status,actions);rows.append(row);
+   row.append(identity,place,coordinates,status);if(!ctx.readOnly){const edit=button('Edit mapping',()=>{editing=d.id;render();focusForm()});edit.setAttribute('aria-label',`Edit mapping for ${d.external_id||d.id}`);actions.append(edit);row.append(actions);}rows.append(row);
   }
-  table.append(head,rows);wrap.append(table);if(ctx.devices.length)mapping.append(el('p','Scroll horizontally to see all device details and mapping actions.','table-scroll-hint'));mapping.append(wrap);
+  table.append(head,rows);wrap.append(table);if(ctx.devices.length)mapping.append(el('p',ctx.readOnly?'Scroll horizontally to see all device details.':'Scroll horizontally to see all device details and mapping actions.','table-scroll-hint'));mapping.append(wrap);
   updateDeviceStatuses();
-  if(!ctx.devices.length)mapping.append(empty('No devices yet','Register the ID sent by your device and choose its location below.'));
+  if(!ctx.devices.length)mapping.append(empty('No devices yet',ctx.readOnly?'No devices are assigned to this public demonstration.':'Register the ID sent by your device and choose its location below.'));
   body.append(mapping);
+  if(ctx.readOnly){pollDeviceContacts(contactFeedback);return;}
   const device=ctx.devices.find(d=>d.id===editing),{p,f}=formShell(device?'Edit device mapping':'Register device',device?'Location changes apply from now. Earlier recordings retain their original location.':'Match the ID configured on the board to a geographic location. A private device credential is shown once after registration.');
   const grid=el('div','','form-grid'),code=input('text',device?.external_id||device?.id||'',{required:true,maxLength:device?36:32,readOnly:!!device,placeholder:'UE-001',autocomplete:'off'});
   const location=select(ctx.locations.map(l=>[l.id,l.name]),device?.location_id||ctx.locations[0]?.id||'');location.required=true;
@@ -164,6 +167,7 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
   saveButton(f,device?'Save mapping':'Register device');if(!ctx.locations.length)f.querySelector('[type=submit]').disabled=true;
   f.onsubmit=async e=>{
    e.preventDefault();
+   if(ctx.readOnly)return;
    if(device){submit(f,()=>ctx.api(`/devices/${device.id}`,{method:'PATCH',body:JSON.stringify({expected_revision:device.config_revision,location_id:location.value,enabled:enabled.value==='true'})}),'Device mapping updated. History preserved.');return;}
    const feedback=f.querySelector('.feedback'),submitButton=f.querySelector('[type=submit]');feedback.replaceChildren();submitButton.disabled=true;
    try{
@@ -182,7 +186,14 @@ export async function mountManagement(container,ctx,{locate=locateCurrentPositio
   body.append(p);
   pollDeviceContacts(contactFeedback);
  }
- async function thresholds(){const {p,f}=formShell('Location thresholds','Each change creates a new version. Earlier incidents keep the rule that applied when they occurred.');body.append(p);const location=select(ctx.locations.map(l=>[l.id,l.name]),editing||ctx.locations[0]?.id||'');f.append(field('Location',location));const content=el('div');f.append(content);let ruleData=null,requestNumber=0;async function load(){const request=++requestNumber,locationId=location.value;content.replaceChildren(el('p','Loading threshold…','muted'));try{const result=await ctx.api(`/locations/${locationId}/threshold`,{signal:ctx.signal});if(ctx.signal.aborted||request!==requestNumber)return;ruleData=result;content.replaceChildren();const savedRevision=ruleData.latest_revision,rule=rules(ruleData.latest||{});content.append(rule.group,el('p',`Latest saved revision: ${ruleData.latest_revision}. Current rule: ${formatLevel(ruleData.current?.threshold_value,ruleData.current?.threshold_type)}. Changes take effect immediately. Existing active incidents transition when a new eligible reading arrives.`,'muted small'));saveButton(content,'Save threshold');f.onsubmit=e=>{e.preventDefault();submit(f,()=>ctx.api(`/locations/${locationId}/threshold`,{method:'PATCH',body:JSON.stringify({...rule.values(),expected_revision:savedRevision})}),'Threshold saved as a new version.',locationId);};}catch(err){if(request===requestNumber&&!ctx.signal.aborted)content.replaceChildren(errorBox(err.message));}}location.onchange=load;if(location.value)load();else content.append(empty('Create a location first','Each location has its own versioned threshold.'));}
+ async function thresholds(){
+  if(ctx.readOnly){
+   const panel=el('section','','panel panel-body');panel.append(el('h2','Location thresholds'));
+   for(const location of ctx.locations){const rule=location.current_threshold,row=el('div','','management-item'),text=el('div');text.append(el('h3',location.name),el('p',formatLevel(rule?.threshold_value,rule?.threshold_type)));if(rule)text.append(el('p',`${rule.interval_seconds} second recording duration · ${rule.recovery_count} consecutive normal readings to recover`,'muted small'));row.append(text);panel.append(row);}
+   if(!ctx.locations.length)panel.append(empty('No thresholds available','No public demonstration location is available yet.'));
+   body.append(panel);return;
+  }
+  const {p,f}=formShell('Location thresholds','Each change creates a new version. Earlier incidents keep the rule that applied when they occurred.');body.append(p);const location=select(ctx.locations.map(l=>[l.id,l.name]),editing||ctx.locations[0]?.id||'');f.append(field('Location',location));const content=el('div');f.append(content);let ruleData=null,requestNumber=0;async function load(){const request=++requestNumber,locationId=location.value;content.replaceChildren(el('p','Loading threshold…','muted'));try{const result=await ctx.api(`/locations/${locationId}/threshold`,{signal:ctx.signal});if(ctx.signal.aborted||request!==requestNumber)return;ruleData=result;content.replaceChildren();const savedRevision=ruleData.latest_revision,rule=rules(ruleData.latest||{});content.append(rule.group,el('p',`Latest saved revision: ${ruleData.latest_revision}. Current rule: ${formatLevel(ruleData.current?.threshold_value,ruleData.current?.threshold_type)}. Changes take effect immediately. Existing active incidents transition when a new eligible reading arrives.`,'muted small'));saveButton(content,'Save threshold');f.onsubmit=e=>{e.preventDefault();submit(f,()=>ctx.api(`/locations/${locationId}/threshold`,{method:'PATCH',body:JSON.stringify({...rule.values(),expected_revision:savedRevision})}),'Threshold saved as a new version.',locationId);};}catch(err){if(request===requestNumber&&!ctx.signal.aborted)content.replaceChildren(errorBox(err.message));}}location.onchange=load;if(location.value)load();else content.append(empty('Create a location first','Each location has its own versioned threshold.'));}
  stopLive=ctx.onLive?.(updateDeviceStatuses)||(()=>{});
  render();return()=>{stopUpdates();ctx.signal.removeEventListener('abort',stopUpdates);body.replaceChildren();};
 }

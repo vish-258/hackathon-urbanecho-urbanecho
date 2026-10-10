@@ -31,7 +31,8 @@ export function createRecordingPlayer(ctx, { timezone, urls = URL } = {}) {
   const close = button('Close recording', () => clear(true), 'secondary');
   const refreshEstimate = button('Refresh sound estimate', () => refreshClassification(), 'secondary');
   const retryEstimate = button('Retry sound classification', () => retryClassification(), 'secondary'); retryEstimate.hidden = true;
-  element.append(title, status, audio, classification, classificationFeedback, close, refreshEstimate, retryEstimate);
+  element.append(title, status, audio, classification, classificationFeedback, close, refreshEstimate);
+  if (!ctx.readOnly) element.append(retryEstimate);
   let request, url, disposed = false, selected, returnFocus, returnRegion, classificationTimer, classificationRequest, classificationFailures = 0;
   function stopClassification() { clearTimeout(classificationTimer); classificationRequest?.abort(); classificationRequest = null; }
   function renderClassification() {
@@ -40,7 +41,7 @@ export function createRecordingPlayer(ctx, { timezone, urls = URL } = {}) {
   }
   function updateClassificationActions() {
     refreshEstimate.hidden = isGroup(selected) || selected?.classification?.status === 'not_requested';
-    retryEstimate.hidden = isGroup(selected) || selected?.classification?.status !== 'failed';
+    retryEstimate.hidden = ctx.readOnly || isGroup(selected) || selected?.classification?.status !== 'failed';
     retryEstimate.disabled = refreshEstimate.disabled || selected?.classification?.worker_status === 'disabled';
     retryEstimate.title = selected?.classification?.worker_status === 'disabled' ? 'Automatic sound classification is switched off.' : '';
   }
@@ -51,11 +52,11 @@ export function createRecordingPlayer(ctx, { timezone, urls = URL } = {}) {
   }
   function refreshClassification() { return requestClassification(false); }
   function retryClassification() {
-    if (selected?.classification?.status !== 'failed' || selected.classification.worker_status === 'disabled') return;
+    if (ctx.readOnly || selected?.classification?.status !== 'failed' || selected.classification.worker_status === 'disabled') return;
     return requestClassification(true);
   }
   async function requestClassification(retry) {
-    if (disposed || !selected || isGroup(selected) || ctx.signal?.aborted || typeof ctx.api !== 'function') return;
+    if (disposed || !selected || isGroup(selected) || ctx.signal?.aborted || typeof ctx.api !== 'function' || (retry && ctx.readOnly)) return;
     stopClassification(); const own = new AbortController(); classificationRequest = own;
     const id = recordingId(selected); refreshEstimate.disabled = true; updateClassificationActions();
     if (retry) classificationFeedback.textContent = 'Requesting another sound estimate…';

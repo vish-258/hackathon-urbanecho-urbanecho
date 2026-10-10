@@ -9,7 +9,7 @@ let token='',controller=null,generation=0,routeController=null,routeCleanup=null
 const subscriptions=new Set();
 let pendingLive=liveChanges(),pendingMetadata=liveChanges();
 const isLocalHost=['localhost','127.0.0.1','[::1]'].includes(location.hostname);
-let localAccess=false, sessionPromise=null, activeRoute=null;
+let localAccess=false, publicAccess=false, publicAvailable=false, sessionPromise=null, activeRoute=null;
 function accessHeaders(){return localAccess?{'X-Soundwatch-Local':'1'}:token?{Authorization:`Bearer ${token}`}:{}}
 async function localSession(signal){
  if(sessionPromise)return sessionPromise;
@@ -23,14 +23,15 @@ async function localSession(signal){
  try{await pending;}finally{if(sessionPromise===pending)sessionPromise=null;}
 }
 function startupError(message){$('startup').hidden=false;$('login').hidden=true;$('startup-error').replaceChildren(errorBox(message));$('retry-local').hidden=false;}
-const ctx={state,locations:[],devices:[],serverNow:()=>Date.now()+serverOffset,dataStaleSeconds:()=>staleSeconds,api,audioFile:(id,options={})=>api(`/audio/${encodeURIComponent(id)}/file`,{...options,responseType:'blob'}),navigate:hash=>{location.hash=hash},refresh:refreshMetadata,reportLiveError:()=>connection('Some view data could not refresh','reconnecting'),onLive:fn=>{subscriptions.add(fn);return()=>subscriptions.delete(fn)},signal:null};
+const ctx={state,get readOnly(){return publicAccess},locations:[],devices:[],serverNow:()=>Date.now()+serverOffset,dataStaleSeconds:()=>staleSeconds,api,audioFile:(id,options={})=>api(`/audio/${encodeURIComponent(id)}/file`,{...options,responseType:'blob'}),navigate:hash=>{location.hash=hash},refresh:refreshMetadata,reportLiveError:()=>connection('Some view data could not refresh','reconnecting'),onLive:fn=>{subscriptions.add(fn);return()=>subscriptions.delete(fn)},signal:null};
 async function api(path,options={},retried=false){
  const {responseType,...requestOptions}=options;
+ if(publicAccess&&!['GET','HEAD'].includes((options.method||'GET').toUpperCase()))throw new Error('Sign in as an administrator to make changes.');
  const response=await fetch(path,{cache:'no-store',credentials:'same-origin',...requestOptions,headers:{...accessHeaders(),...(options.body?{'Content-Type':'application/json'}:{}),...options.headers}});
  if(localAccess&&response.status===401&&!retried){await localSession(controller?.signal);return api(path,options,true);}
  if(response.ok&&responseType==='blob')return response.blob();
  const data=await response.json().catch(()=>null);
- if(!response.ok){const detail=data?.error;const message=typeof detail?.message==='string'?detail.message:detail?.message?.message;let text=response.status===401||response.status===403?(localAccess?'The local connection needs to be reopened. Use Reconnect.':'Administrator access was not accepted. Please reconnect.'):message||`Request failed (${response.status}). Please try again.`;if(detail?.details?.length)text+=' '+detail.details.map(d=>`${(d.location||[]).slice(1).join(' ')}: ${d.message}`).join('; ');const err=new Error(text);err.status=response.status;throw err;}return data;
+ if(!response.ok){const detail=data?.error;const message=typeof detail?.message==='string'?detail.message:detail?.message?.message;let text=response.status===401||response.status===403?(publicAccess?'The public demo is unavailable. Use Reconnect.':localAccess?'The local connection needs to be reopened. Use Reconnect.':'Administrator access was not accepted. Please reconnect.'):message||`Request failed (${response.status}). Please try again.`;if(detail?.details?.length)text+=' '+detail.details.map(d=>`${(d.location||[]).slice(1).join(' ')}: ${d.message}`).join('; ');const err=new Error(text);err.status=response.status;throw err;}return data;
 }
 async function allPages(path,signal){const items=[];let offset=0;while(true){const page=await api(`${path}${path.includes('?')?'&':'?'}limit=200&offset=${offset}`,{signal});items.push(...page.items);offset+=page.items.length;if(offset>=page.total||!page.items.length)return items;}}
 async function refreshMetadata(){
@@ -68,22 +69,37 @@ function scheduleMetadata(event){
   catch{if(!signal?.aborted&&run===generation)connection('Configuration refresh failed','reconnecting');}
  },500);
 }
-function disconnect(){generation++;controller?.abort();controller=null;routeController?.abort();routeCleanup?.();routeCleanup=null;overview?.destroy();overview=null;subscriptions.clear();token='';localAccess=false;sessionPromise=null;refreshing=null;metadataDirty=false;clearTimeout(metadataTimer);clearTimeout(liveTimer);liveTimer=null;pendingLive=liveChanges();pendingMetadata=liveChanges();$('content').replaceChildren();$('content').hidden=true;$('startup').hidden=!isLocalHost;$('login').hidden=isLocalHost;$('signout').hidden=true;$('reconnect').hidden=true;$('connect').disabled=false;connection('Not connected');}
-async function connectLoop(signal,run){let needsSnapshot=true;let renewedStreamSession=false;let delay=1500;while(!signal.aborted&&run===generation){try{if(needsSnapshot){await Promise.all([refreshMetadata(),loadSnapshot(signal)]);if(signal.aborted)return;needsSnapshot=false;$('startup').hidden=true;$('login').hidden=true;$('content').hidden=false;$('signout').hidden=localAccess;$('reconnect').hidden=false;await renderRoute();}connection('Connecting');const response=await fetch('/events/stream',{headers:{...accessHeaders(),'Last-Event-ID':state.cursor},credentials:'same-origin',signal,cache:'no-store'});if([409,410].includes(response.status)){needsSnapshot=true;continue}if(localAccess&&response.status===401&&!renewedStreamSession){renewedStreamSession=true;await localSession(signal);continue}if([401,403].includes(response.status)){const err=new Error(localAccess?'The local connection needs to be reopened.':'Administrator access was not accepted.');err.status=response.status;throw err}if(!response.ok)throw new Error('Live connection interrupted');connection('Live updates','live');renewedStreamSession=false;delay=1500;const reader=response.body.getReader(),decoder=new TextDecoder();let resync=false;
+function disconnect(){generation++;controller?.abort();controller=null;routeController?.abort();routeCleanup?.();routeCleanup=null;overview?.destroy();overview=null;subscriptions.clear();token='';localAccess=false;publicAccess=false;sessionPromise=null;refreshing=null;metadataDirty=false;clearTimeout(metadataTimer);clearTimeout(liveTimer);liveTimer=null;pendingLive=liveChanges();pendingMetadata=liveChanges();$('content').replaceChildren();$('content').hidden=true;$('startup').hidden=!isLocalHost;$('login').hidden=isLocalHost;$('signout').hidden=true;$('admin-signin').hidden=true;$('back-to-demo').hidden=!publicAvailable;$('reconnect').hidden=true;$('connect').disabled=false;connection('Not connected');}
+async function connectLoop(signal,run){let needsSnapshot=true;let renewedStreamSession=false;let delay=1500;while(!signal.aborted&&run===generation){try{if(needsSnapshot){await Promise.all([refreshMetadata(),loadSnapshot(signal)]);if(signal.aborted)return;needsSnapshot=false;$('startup').hidden=true;$('login').hidden=true;$('content').hidden=false;$('signout').hidden=localAccess||publicAccess;$('admin-signin').hidden=!publicAccess;$('back-to-demo').hidden=!publicAvailable;$('reconnect').hidden=false;await renderRoute();}connection('Connecting');const response=await fetch('/events/stream',{headers:{...accessHeaders(),'Last-Event-ID':state.cursor},credentials:'same-origin',signal,cache:'no-store'});if([409,410].includes(response.status)){needsSnapshot=true;continue}if(localAccess&&response.status===401&&!renewedStreamSession){renewedStreamSession=true;await localSession(signal);continue}if([401,403].includes(response.status)){const err=new Error(localAccess?'The local connection needs to be reopened.':'Administrator access was not accepted.');err.status=response.status;throw err}if(!response.ok)throw new Error('Live connection interrupted');connection(publicAccess?'Public demo':'Live updates','live');renewedStreamSession=false;delay=1500;const reader=response.body.getReader(),decoder=new TextDecoder();let resync=false;
  const parse=sseParser(frame=>{if(frame.type==='stream.resync_required'){resync=true;return}applyEvent(state,frame.data,frame.id);liveUpdate(frame.data);if(CONFIGURATION_REASONS.has(frame.data.transition_reason))scheduleMetadata(frame.data);});
  try{while(!signal.aborted){const{done,value}=await reader.read();if(done)break;parse(decoder.decode(value,{stream:true}));if(resync){needsSnapshot=true;await reader.cancel();break}}}finally{reader.releaseLock()}if(resync)continue;throw new Error('Live connection interrupted');
- }catch(error){if(signal.aborted||run!==generation)return;if([401,403].includes(error.status)){disconnect();if(isLocalHost)startupError('The local connection needs to be reopened. Please try again.');else $('login-error').replaceChildren(errorBox(error.message));return;}connection('Reconnecting…','reconnecting');if(isLocalHost&&!$('startup').hidden)startupError('Waiting for the local server. Keep Docker running.');else if(!$('login').hidden)$('login-error').replaceChildren(errorBox(error.message));await new Promise(resolve=>{const timer=setTimeout(resolve,delay);signal.addEventListener('abort',()=>{clearTimeout(timer);resolve()},{once:true})});delay=Math.min(delay*1.5,15000);}}}
+ }catch(error){if(signal.aborted||run!==generation)return;if([401,403].includes(error.status)){const wasPublic=publicAccess;disconnect();if(wasPublic){connection('Demo unavailable','reconnecting');startupError('The public demo could not open. Please try again.');}else if(isLocalHost)startupError('The local connection needs to be reopened. Please try again.');else $('login-error').replaceChildren(errorBox(error.message));return;}connection('Reconnecting…','reconnecting');if(isLocalHost&&!$('startup').hidden)startupError('Waiting for the local server. Keep Docker running.');else if(publicAccess&&!$('startup').hidden)startupError('Waiting for the hosted demo. It may take about a minute to wake up.');else if(!$('login').hidden)$('login-error').replaceChildren(errorBox(error.message));await new Promise(resolve=>{const timer=setTimeout(resolve,delay);signal.addEventListener('abort',()=>{clearTimeout(timer);resolve()},{once:true})});delay=Math.min(delay*1.5,15000);}}}
 $('login-form').onsubmit=e=>{e.preventDefault();const value=$('admin-token').value.trim();if(!value)return;disconnect();Object.assign(state,initialState());token=value;$('admin-token').value='';$('login-error').replaceChildren();$('connect').disabled=true;controller=new AbortController();connection('Loading workspace');void connectLoop(controller.signal,generation);};
 async function startLocal(){
  disconnect();Object.assign(state,initialState());$('startup-error').replaceChildren();$('retry-local').hidden=true;controller=new AbortController();const signal=controller.signal,run=generation;connection('Opening local workspace');
  try{await localSession(signal);if(signal.aborted||run!==generation)return;localAccess=true;void connectLoop(signal,run);}
  catch(error){if(!signal.aborted&&run===generation){connection('Local connection interrupted','reconnecting');startupError(error.message);}}
 }
-$('retry-local').onclick=()=>void startLocal();
-$('signout').onclick=disconnect;$('reconnect').onclick=()=>{if(isLocalHost){void startLocal();return;}controller?.abort();generation++;controller=new AbortController();refreshing=null;void connectLoop(controller.signal,generation)};window.addEventListener('pagehide',disconnect);
+async function startRemote(){
+ disconnect();Object.assign(state,initialState());$('startup').hidden=false;$('login').hidden=true;$('startup-error').replaceChildren();$('retry-local').hidden=true;
+ controller=new AbortController();const signal=controller.signal,run=generation;connection('Opening workspace');
+ try{
+  const response=await fetch('/app/access',{cache:'no-store',credentials:'same-origin',signal});
+  if(!response.ok)throw new Error('The hosted app could not open. It may take about a minute to wake up; please try again.');
+  const access=await response.json();if(signal.aborted||run!==generation)return;
+  publicAvailable=access.access==='public'&&access.read_only===true;
+  $('back-to-demo').hidden=!publicAvailable;
+  if(!publicAvailable){$('startup').hidden=true;$('login').hidden=false;connection('Not connected');return;}
+  publicAccess=true;void connectLoop(signal,run);
+ }catch(error){if(!signal.aborted&&run===generation){connection('Connection interrupted','reconnecting');startupError(error.message);}}
+}
+$('retry-local').onclick=()=>void (isLocalHost?startLocal():startRemote());
+$('admin-signin').onclick=()=>{disconnect();$('startup').hidden=true;$('login').hidden=false;$('admin-token').focus();};
+$('back-to-demo').onclick=()=>void startRemote();
+$('signout').onclick=()=>void startRemote();$('reconnect').onclick=()=>{if(isLocalHost){void startLocal();return;}controller?.abort();generation++;controller=new AbortController();refreshing=null;void connectLoop(controller.signal,generation)};window.addEventListener('pagehide',disconnect);
 document.querySelector('.skip-link').addEventListener('click',e=>{e.preventDefault();$('main').focus();});
-window.addEventListener('hashchange',()=>{if((localAccess||token)&&state.cursor)void renderRoute({navigation:true})});
-setInterval(()=>{if((localAccess||token)&&state.cursor){const previous=JSON.stringify([...state.locations.values()].map(l=>[l.data_status,...l.streams.map(s=>s.data_status)]));ageData(state,Date.now()+serverOffset,staleSeconds);if(previous!==JSON.stringify([...state.locations.values()].map(l=>[l.data_status,...l.streams.map(s=>s.data_status)])))liveUpdate();}},1000);
+window.addEventListener('hashchange',()=>{if((localAccess||publicAccess||token)&&state.cursor)void renderRoute({navigation:true})});
+setInterval(()=>{if((localAccess||publicAccess||token)&&state.cursor){const previous=JSON.stringify([...state.locations.values()].map(l=>[l.data_status,...l.streams.map(s=>s.data_status)]));ageData(state,Date.now()+serverOffset,staleSeconds);if(previous!==JSON.stringify([...state.locations.values()].map(l=>[l.data_status,...l.streams.map(s=>s.data_status)])))liveUpdate();}},1000);
 async function renderRoute({navigation=false}={}){
  const hash=location.hash.slice(1).replace(/^\//,'');
  const [path,query='']=hash.split('?'),[page='overview',id]=path.split('/');
@@ -120,7 +136,7 @@ async function renderRoute({navigation=false}={}){
 }
 function routeContext(signal){return {...ctx,signal,get locations(){return ctx.locations},get devices(){return ctx.devices}};}
 function mountOverview(container){
- const heading=el('div','','page-heading'),headingText=el('div');headingText.append(el('h1','Noise, made visible.'),el('p','See current sound conditions across your locations.'));heading.append(headingText,button('Manage locations',()=>location.hash='management','secondary'));container.append(heading);
+ const heading=el('div','','page-heading'),headingText=el('div');headingText.append(el('h1','Noise, made visible.'),el('p','See current sound conditions across your locations.'));heading.append(headingText,button(ctx.readOnly?'View locations':'Manage locations',()=>location.hash='management','secondary'));container.append(heading);
  const demoNotice=el('div','Locations marked SIMULATED or SYNTHETIC use generated recordings. They are demonstrations, not physical sound measurements.','notice');demoNotice.hidden=!ctx.locations.some(l=>/simulat|synthetic/i.test(l.name));container.append(demoNotice);
  const stats=el('div','','stats');const counts={},notes={},statCards={};for(const[key,title,note,icon]of[['locations','Registered locations','Across your monitoring area','locations'],['reporting','Connected devices','Recent uploads or device messages','reporting'],['incidents','Active incidents','Includes recovery in progress','alert'],['stale','Devices needing attention','Connection or sound-reading readiness','stale']]){const card=el('div','',`stat stat-${key}`);statCards[key]=card;counts[key]=el('strong','—');notes[key]=el('span',note,'stat-note');card.append(el('div',title,'stat-label'),el('span','',`stat-icon icon icon-${icon}`),counts[key],notes[key]);stats.append(card);}container.append(stats);
  const contactFeedback=el('p','','muted small contact-feedback');contactFeedback.setAttribute('role','status');container.append(contactFeedback);
@@ -239,5 +255,5 @@ function mountOverview(container){
  update();const stopContacts=startDeviceContactMonitor({api:ctx.api,signal:ctx.signal,contacts,now:()=>ctx.serverNow(),onUpdate:update,onError:error=>{if(!destroyed)contactFeedback.textContent=error?'Contact check unavailable; retrying. Times shown are the last confirmed contact.':'';}});requestAnimationFrame(()=>{if(!destroyed){map?.invalidateSize();fitMap()}});return{update,destroy(){destroyed=true;stopContacts();map?.remove();}};
 }
 
-if(isLocalHost)void startLocal();else{$('startup').hidden=true;$('login').hidden=false;}
-window.addEventListener('pageshow',event=>{if(event.persisted&&isLocalHost)void startLocal();});
+if(isLocalHost)void startLocal();else void startRemote();
+window.addEventListener('pageshow',event=>{if(event.persisted)void (isLocalHost?startLocal():startRemote());});

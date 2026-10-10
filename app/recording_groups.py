@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import clock
-from app.auth import require_admin
+from app.read_access import Read
 from app.config import get_settings
 from app.daily import source_kind
 from app.db import get_db
@@ -33,7 +33,6 @@ COLLECT_GRACE_SECONDS = 30
 MAX_PART_ROWS = 21  # A group has ten sequences; excess/conflicts are not hidden.
 router = APIRouter(tags=["saved recordings"])
 DB = Annotated[Session, Depends(get_db)]
-Admin = Annotated[None, Depends(require_admin)]
 
 
 def group_sources(db, group_id):
@@ -158,13 +157,15 @@ def group_dict(row, external_id=None):
 
 
 @router.get("/recordings")
-def recordings(db: DB, admin: Admin, location_id: UUID | None = None, device_id: UUID | None = None,
+def recordings(db: DB, access: Read, location_id: UUID | None = None, device_id: UUID | None = None,
                since: AwareDatetime | None = None, until: AwareDatetime | None = None,
                received_until: AwareDatetime | None = None,
                limit: Annotated[int, Query(ge=1, le=200)] = 100,
                offset: Annotated[int, Query(ge=0, le=10000000)] = 0):
     if since is not None and until is not None and since > until:
         raise HTTPException(422, "since must not be after until")
+    location_id = access.location_filter(location_id)
+    access.require_device(db, device_id)
     where = []
     if location_id is not None:
         where.append(RecordingGroup.location_id == location_id)
@@ -192,15 +193,19 @@ def require_group(db, group_id):
 
 
 @router.get("/recordings/{group_id}")
-def recording(group_id: UUID, db: DB, admin: Admin):
+def recording(group_id: UUID, db: DB, access: Read):
     row = require_group(db, group_id)
+    access.require_location(row.location_id)
+    access.require_manifest(db, row.manifest)
     return group_dict(row, db.scalar(select(Device.external_id).where(Device.id == row.device_id)))
 
 
 @router.get("/recordings/{group_id}/file")
-def recording_file(group_id: UUID, db: DB, admin: Admin,
+def recording_file(group_id: UUID, db: DB, access: Read,
                    revision: Annotated[str | None, Query(pattern=r"^[a-f0-9]{64}$")] = None):
     row = require_group(db, group_id)
+    access.require_location(row.location_id)
+    access.require_manifest(db, row.manifest)
     if row.status != "ready" or row.dirty or not row.manifest or not row.manifest.get("file_available"):
         raise HTTPException(409, "A complete, continuous ten-second recording is not available for this group")
     if revision is not None and row.revision != revision:

@@ -47,7 +47,7 @@ const summaryStatus = stats => stats.coverage_status === 'complete' ? 'Complete 
 const summarySource = definition => definition.source_kind === 'simulated' ? 'SIMULATED' : 'Recorded measurements';
 const summaryLevel = (value, definition) => isNumber(value) ? formatLevel(value, definition.measurement_type) : 'No usable data';
 
-function dailySummaryCard(summary, timezone, compact = false, devices = []) {
+function dailySummaryCard(summary, timezone, compact = false, devices = [], readOnly = false) {
   const definition = summary.definition || {}, stats = summary.statistics || {};
   const panel = compact ? el('article', '', 'report-compact') : section(definition.measurement_type === 'dbfs_rms' ? 'Digital signal levels' : 'Sound pressure · Z weighting');
   const status = el('div', '', 'report-status');
@@ -74,7 +74,7 @@ function dailySummaryCard(summary, timezone, compact = false, devices = []) {
   if (compact) return panel;
   if (definition.source_kind === 'simulated') panel.append(el('p', 'Demonstration recordings only. These values do not represent real calibrated environmental measurements.', 'view-demo-note'));
   if (stats.coverage_status !== 'complete') panel.append(el('p', stats.coverage_status === 'no_data' ? 'No usable measurements were available for this definition. No sound level has been substituted.' : 'This result describes only the recorded time shown above. It is not a fully monitored daily noise level.', 'report-coverage-note'));
-  if (stats.is_provisional) panel.append(el('p', 'This local day is still in progress. Generate again after it ends to include its later recordings.', 'muted'));
+  if (stats.is_provisional) panel.append(el('p', readOnly ? 'This local day is still in progress. The saved result may not include later recordings.' : 'This local day is still in progress. Generate again after it ends to include its later recordings.', 'muted'));
   if (definition.measurement_type === 'dbfs_rms') panel.append(el('p', `Digital levels belong to device ${deviceLabel(definition, devices)} and are kept separate from other devices. They are not calibrated sound-pressure levels.`, 'muted'));
   const details = el('details', '', 'view-disclosure report-calculation');
   details.append(el('summary', 'Calculation and data quality'));
@@ -404,14 +404,14 @@ async function locationView(container, route, ctx) {
   devicesPanel.append(contactFeedback);
   const devicesBody = el('div'); devicesPanel.append(devicesBody);
   const thresholdPanel = section('Threshold history', 'Changing a setting never rewrites a saved incident.');
-  const thresholdBody = el('div'); thresholdPanel.append(thresholdBody, link('Manage thresholds →', '#/management', ctx));
+  const thresholdBody = el('div'); thresholdPanel.append(thresholdBody, link(ctx.readOnly ? 'View thresholds →' : 'Manage thresholds →', '#/management', ctx));
   lower.append(devicesPanel, thresholdPanel);
   const recent = section('Recent incidents');
   const recentBody = el('div'); recent.append(recentBody, link('Open incident history →', `#/incidents?location=${encodeURIComponent(location.id)}`, ctx));
   const daily = section('Daily summaries', `Previous completed local day · ${localReportingDate(location.timezone)} · ${location.timezone}`);
   const dailyBody = el('div');
   dailyBody.append(el('p', 'Loading saved daily summaries…', 'muted'));
-  daily.append(dailyBody, link('Open daily reports / recalculate →', `#/reports?location=${encodeURIComponent(location.id)}`, ctx));
+  daily.append(dailyBody, link(ctx.readOnly ? 'Open daily reports →' : 'Open daily reports / recalculate →', `#/reports?location=${encodeURIComponent(location.id)}`, ctx));
   const recordingsPanel = section('Saved 10-second recordings', 'Listen to complete continuous recordings from each device, including uncalibrated audio. Short individual recordings remain linked to their readings below.');
   const player = createRecordingPlayer(ctx, { timezone: location.timezone });
   const recordings = createRecordingsBrowser(ctx, { locationId: location.id, timezone: location.timezone, devices: assignedDevices, player });
@@ -437,7 +437,7 @@ async function locationView(container, route, ctx) {
     const now = ctx.serverNow?.() ?? Date.now(), staleSeconds = ctx.dataStaleSeconds?.() ?? 30;
     const assigned = assignedDevices;
     devicesBody.replaceChildren();
-    if (!assigned.length) devicesBody.append(empty('No assigned devices', 'Register a device in Management to begin receiving recordings.'));
+    if (!assigned.length) devicesBody.append(empty('No assigned devices', ctx.readOnly ? 'No devices are assigned to this public demonstration.' : 'Register a device in Management to begin receiving recordings.'));
     for (const device of assigned) {
       const connection = deviceConnection(device, current, { contact: deviceContacts.get(device.id), now, staleSeconds });
       const reading = deviceReadingStatus({ ...device, last_contact_at: connection.contact }, { ...location, current_threshold: currentThreshold?.current }, current);
@@ -538,9 +538,9 @@ async function locationView(container, route, ctx) {
         dailyBody.append(el('p', 'Summary processing is underway. Any values below are the previous saved result.', 'report-coverage-note'));
         dailyTimer = setTimeout(loadDaily, 1800);
       }
-      if (result.report?.status === 'failed') dailyBody.append(errorBox(result.report.error || result.report.last_error || 'The last summary calculation failed. Open Daily reports to try again.'));
-      for (const item of result.summaries || []) dailyBody.append(dailySummaryCard(item, result.timezone || location.timezone, true, ctx.devices));
-      if (!result.summaries?.length && !reportPending(result.report)) dailyBody.append(empty(result.report?.status === 'completed' ? 'No usable data' : 'No saved summary yet', 'Open Daily reports to generate a summary. Missing recordings are never treated as silence.'));
+      if (result.report?.status === 'failed') dailyBody.append(errorBox(result.report.error || result.report.last_error || (ctx.readOnly ? 'The last summary calculation failed. No new result is available.' : 'The last summary calculation failed. Open Daily reports to try again.')));
+      for (const item of result.summaries || []) dailyBody.append(dailySummaryCard(item, result.timezone || location.timezone, true, ctx.devices, ctx.readOnly));
+      if (!result.summaries?.length && !reportPending(result.report)) dailyBody.append(empty(result.report?.status === 'completed' ? 'No usable data' : 'No saved summary yet', ctx.readOnly ? 'No saved summary is available for this day. Missing recordings are never treated as silence.' : 'Open Daily reports to generate a summary. Missing recordings are never treated as silence.'));
     } catch (error) { if (!disposed && !ctx.signal?.aborted) dailyBody.replaceChildren(errorBox(errorMessage(error))); }
   }
 
@@ -703,7 +703,7 @@ async function reportsView(container, route, ctx) {
   const query = route.params || new URLSearchParams(location.hash.split('?')[1] || '');
   container.append(heading('Daily reports', 'Saved sound levels, incident starts, and recording coverage for each location’s local day.'));
   if (!ctx.locations.length) {
-    container.append(empty('No locations yet', 'Add a location in Management before generating its daily summary.'), link('Open Management →', '#/management', ctx));
+    container.append(empty('No locations yet', ctx.readOnly ? 'No public demonstration location is available yet.' : 'Add a location in Management before generating its daily summary.'), link(ctx.readOnly ? 'View settings →' : 'Open Management →', '#/management', ctx));
     return () => {};
   }
   const filters = el('div', '', 'view-controls panel view-panel report-controls');
@@ -716,7 +716,7 @@ async function reportsView(container, route, ctx) {
   day.value = /^\d{4}-\d{2}-\d{2}$/.test(query.get('date') || '') ? query.get('date') : localReportingDate(chosen.timezone);
   const generate = button('Generate summary', () => run(true), 'primary');
   const refresh = button('Refresh saved results', () => run(), 'secondary');
-  const actions = el('div', '', 'report-actions'); actions.append(generate, refresh);
+  const actions = el('div', '', 'report-actions'); if (!ctx.readOnly) actions.append(generate); actions.append(refresh);
   const scope = el('p', `${day.value} · ${chosen.timezone} · midnight to the next local midnight${day.value === day.max ? ' · today is provisional' : ''}`, 'muted report-scope');
   filters.append(field('Location', locationSelect), field('Report date', day), actions, scope);
   const feedback = el('div', '', 'report-feedback'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
@@ -727,7 +727,7 @@ async function reportsView(container, route, ctx) {
 
   function controls() {
     const pending = reportPending(current?.report);
-    generate.disabled = busy || pending || !day.value || day.value > day.max;
+    generate.disabled = ctx.readOnly || busy || pending || !day.value || day.value > day.max;
     refresh.disabled = busy;
     generate.textContent = pending ? current.report.status === 'queued' ? 'Queued…' : 'Processing…' : current?.report || current?.summaries?.length ? 'Recalculate summary' : 'Generate summary';
     body.setAttribute('aria-busy', String(busy || pending));
@@ -741,18 +741,18 @@ async function reportsView(container, route, ctx) {
     scope.textContent = `${result.reporting_date} · ${timezone} · midnight to the next local midnight${day.value === day.max ? ' · today is provisional' : ''}${timezone !== chosen.timezone ? ` · saved report timezone (location now uses ${chosen.timezone})` : ''}`;
     if (reportPending(report)) feedback.append(el('p', `${report.status === 'queued' ? 'Queued for processing.' : 'Calculating this local day’s summary.'}${summaries.length ? ' The results below are the previous saved version and will update when processing finishes.' : ' Results will appear here when processing finishes.'}`, 'report-coverage-note'));
     if (report?.status === 'failed') {
-      feedback.append(errorBox(report.error || report.last_error || 'The last calculation failed. Please try Recalculate summary.'));
+      feedback.append(errorBox(report.error || report.last_error || (ctx.readOnly ? 'The last calculation failed. No new result is available.' : 'The last calculation failed. Please try Recalculate summary.')));
       if (summaries.length) feedback.append(el('p', 'The results below are the previous saved version. The failed calculation did not replace them.', 'muted'));
     }
     if (report?.completed_at && !summaries.length) feedback.append(el('p', `Last calculation: ${formatTime(report.completed_at, timezone)}`, 'muted'));
-    for (const summary of summaries) body.append(dailySummaryCard(summary, timezone, false, ctx.devices));
-    if (!summaries.length && !reportPending(report)) body.append(empty(report?.status === 'completed' ? 'No usable data' : report?.status === 'failed' ? 'No completed summary' : 'No saved summary yet', report?.status === 'completed' ? 'No eligible measurements were found for this location and day. No zero sound level has been substituted.' : 'Choose Generate summary to calculate the stored recordings for this local date.'));
-    if (report?.source_as_of) body.append(el('p', `Source data checked: ${formatTime(report.source_as_of, timezone)}. Recalculate to include late arrivals or reprocessed measurements.`, 'muted report-generated'));
+    for (const summary of summaries) body.append(dailySummaryCard(summary, timezone, false, ctx.devices, ctx.readOnly));
+    if (!summaries.length && !reportPending(report)) body.append(empty(report?.status === 'completed' ? 'No usable data' : report?.status === 'failed' ? 'No completed summary' : 'No saved summary yet', report?.status === 'completed' ? 'No eligible measurements were found for this location and day. No zero sound level has been substituted.' : ctx.readOnly ? 'No saved summary is available for this day. Choose another date or refresh to check for saved results.' : 'Choose Generate summary to calculate the stored recordings for this local date.'));
+    if (report?.source_as_of) body.append(el('p', `Source data checked: ${formatTime(report.source_as_of, timezone)}.${ctx.readOnly ? ' Later recordings may not be included in this saved result.' : ' Recalculate to include late arrivals or reprocessed measurements.'}`, 'muted report-generated'));
     controls();
   }
   async function run(submit = false) {
     clearTimeout(timer);
-    if (disposed || ctx.signal?.aborted || busy) return;
+    if (disposed || ctx.signal?.aborted || busy || (submit && ctx.readOnly)) return;
     if (!day.value || (submit && day.value > day.max)) { feedback.replaceChildren(errorBox('Choose today or an earlier date in this location’s timezone.')); controls(); return; }
     const ownGeneration = ++generation;
     busy = true; controls();

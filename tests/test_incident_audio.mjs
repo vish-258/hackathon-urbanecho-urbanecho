@@ -23,12 +23,12 @@ class Element {
 }
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 const saved = (revision = 'version-1') => ({ status: 'completed', provisional: false, revision, generated_at: '2026-10-10T01:03:00Z', worker_status: 'ready', classification: { status: 'completed', primary_category: 'traffic', confidence_status: 'classified', classified_at: '2026-10-10T01:03:00Z', top_labels: [{ label: 'Vehicle', score: 0.812 }] }, audio: { available: true, revision, started_at: '2026-10-10T01:02:00Z', ended_at: '2026-10-10T01:02:20Z', duration_seconds: 4, window_duration_seconds: 20, coverage_percent: 20, context_before_seconds: 5, context_after_seconds: 5, recording_count: 4, gap_count: 1, excluded_count: 1, source_kind: 'physical', gaps: [{ started_at: '2026-10-10T01:02:02Z', ended_at: '2026-10-10T01:02:18Z', duration_seconds: 16 }] } });
-function fixture(t, first = saved()) {
+function fixture(t, first = saved(), { readOnly = false } = {}) {
   const document = globalThis.document; globalThis.document = { createElement: tag => new Element(tag) }; t.after(() => { globalThis.document = document; });
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let current = first;
   const calls = [], created = [], revoked = [], controller = new AbortController();
-  const ctx = { signal: controller.signal, async api(path, options) { calls.push({ path, options }); return options?.responseType === 'blob' ? new Blob(['wav']) : current; } };
+  const ctx = { readOnly, signal: controller.signal, async api(path, options) { calls.push({ path, options }); return options?.responseType === 'blob' ? new Blob(['wav']) : current; } };
   const urls = { createObjectURL(blob) { created.push(blob); return `blob:incident-${created.length}`; }, revokeObjectURL(url) { revoked.push(url); } };
   const panel = createIncidentAudio(ctx, { incidentId: 'incident-1', urls }); t.after(panel.dispose);
   panel.setIncident({ location_snapshot: { timezone: 'UTC' }, ended_at: '2026-10-10T01:02:15Z' });
@@ -208,4 +208,15 @@ test('opening pending or unavailable incident audio reveals its state without ra
   assert.match(f.panel.element.textContent, /No recorded audio/);
   assert.equal(f.created.length, 0); assert.equal(f.audio.plays, 0);
   assert.ok(f.calls.every(call => call.path === '/incidents/incident-1/analysis'));
+});
+
+
+test('public incident audio permits saved refresh and revision-bound playback without recalculation', async t => {
+  const f = fixture(t, saved(), { readOnly: true }); await f.panel.loaded;
+  assert.equal(f.panel.element.all().some(node => node.tag === 'button' && /Generate|Recalculate/.test(node.textContent)), false);
+  await f.button('Refresh incident audio').click();
+  await f.button('Listen to incident audio').click();
+  assert.equal(f.audio.src, 'blob:incident-1');
+  assert.equal(f.calls.at(-1).path, '/incidents/incident-1/audio/file?revision=version-1');
+  assert.ok(f.calls.every(call => !call.options?.method || call.options.method === 'GET'));
 });

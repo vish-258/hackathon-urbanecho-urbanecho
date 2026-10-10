@@ -10,6 +10,7 @@ from app.classification_jobs import classification_dict, classifications_for, en
 from app.config import get_settings
 from app.db import get_db
 from app.models import AudioChunk
+from app.read_access import Read
 
 router = APIRouter(tags=["sound classification"])
 DB = Annotated[Session, Depends(get_db)]
@@ -22,9 +23,11 @@ def status(db: DB, admin: Admin):
 
 
 @router.get("/audio/{audio_id}/classification")
-def classification(audio_id: UUID, db: DB, admin: Admin):
-    if db.get(AudioChunk, audio_id) is None:
+def classification(audio_id: UUID, db: DB, access: Read):
+    chunk = db.get(AudioChunk, audio_id)
+    if chunk is None:
         raise HTTPException(404, "Audio recording not found")
+    access.require_location(chunk.location_id)
     return classifications_for(db, [audio_id])[audio_id]
 
 

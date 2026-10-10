@@ -22,6 +22,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import authenticate_device, bearer, is_admin, require_admin, token_hash, token_value
 from app.config import get_settings
+from app.read_access import Read, require_read
 from app.db import get_db, wait_for_database
 from app.models import AudioChunk, Device, Incident, Location, Measurement, ProcessingJob, MeasurementEvaluation, ThresholdVersion, DurableEvent, EventClock
 from app.schemas import DeviceCreate, DeviceUpdate, LocationCreate, LocationUpdate, ThresholdUpdate, UploadMetadata
@@ -268,8 +269,8 @@ def create_app():
         return location_dict(db, row)
 
     @app.get("/locations", tags=["locations"])
-    def locations(db: DB, admin: Admin, limit: Limit = 50, offset: Offset = 0):
-        return page(db, select(Location).order_by(Location.created_at, Location.id), limit, offset, lambda row: location_dict(db, row))
+    def locations(db: DB, access: Read, limit: Limit = 50, offset: Offset = 0):
+        return page(db, access.scope(select(Location), Location.id).order_by(Location.created_at, Location.id), limit, offset, lambda row: location_dict(db, row))
 
     @app.get("/locations/nearby", tags=["locations"])
     def nearby(latitude: Latitude, longitude: Longitude, radius_m: Annotated[float, Query(gt=0, le=20000000, allow_inf_nan=False)], db: DB, admin: Admin, limit: Limit = 50, offset: Offset = 0):
@@ -287,7 +288,8 @@ def create_app():
         return {"type": "FeatureCollection", "features": features, **result}
 
     @app.get("/locations/{location_id}", tags=["locations"])
-    def get_location(location_id: UUID, db: DB, admin: Admin):
+    def get_location(location_id: UUID, db: DB, access: Read):
+        access.require_location(location_id)
         return location_dict(db, require_row(db, Location, location_id))
 
     @app.patch("/locations/{location_id}", tags=["locations"])
@@ -327,7 +329,8 @@ def create_app():
         return result
 
     @app.get("/locations/{location_id}/threshold", tags=["locations"])
-    def get_threshold(location_id: UUID, db: DB, admin: Admin, at: AwareDatetime | None = None):
+    def get_threshold(location_id: UUID, db: DB, access: Read, at: AwareDatetime | None = None):
+        access.require_location(location_id)
         require_row(db, Location, location_id)
         latest = latest_threshold(db, location_id)
         selected = threshold_at(db, location_id, at or clock.now())
@@ -336,7 +339,8 @@ def create_app():
                 "latest_revision": latest.revision if latest else 0}
 
     @app.get("/locations/{location_id}/threshold/versions", tags=["locations"])
-    def threshold_versions(location_id: UUID, db: DB, admin: Admin, limit: Limit = 50, offset: Offset = 0):
+    def threshold_versions(location_id: UUID, db: DB, access: Read, limit: Limit = 50, offset: Offset = 0):
+        access.require_location(location_id)
         require_row(db, Location, location_id)
         return page(db, select(ThresholdVersion).where(ThresholdVersion.location_id == location_id)
                     .order_by(ThresholdVersion.revision.desc()), limit, offset)
@@ -367,11 +371,12 @@ def create_app():
         return {**model_dict(row, ("credential_hash",)), "token": token}
 
     @app.get("/devices", tags=["devices"])
-    def devices(db: DB, admin: Admin, limit: Limit = 50, offset: Offset = 0):
-        return page(db, select(Device).order_by(Device.id), limit, offset, lambda row: model_dict(row, ("credential_hash",)))
+    def devices(db: DB, access: Read, limit: Limit = 50, offset: Offset = 0):
+        return page(db, access.scope(select(Device), Device.location_id).order_by(Device.id), limit, offset, lambda row: model_dict(row, ("credential_hash",)))
 
     @app.get("/devices/{device_id}", tags=["devices"])
-    def device(device_id: UUID, db: DB, admin: Admin):
+    def device(device_id: UUID, db: DB, access: Read):
+        access.require_device(db, device_id)
         return model_dict(require_row(db, Device, device_id), ("credential_hash",))
 
     @app.patch("/devices/{device_id}", tags=["devices"])
@@ -409,7 +414,7 @@ def create_app():
         return JSONResponse(jsonable_encoder(result), status_code=200 if result["duplicate"] else 202)
 
     @app.get("/audio", tags=["audio"])
-    def recordings(db: DB, admin: Admin, device_id: UUID | None = None, location_id: UUID | None = None,
+    def recordings(db: DB, access: Read, device_id: UUID | None = None, location_id: UUID | None = None,
                    since: AwareDatetime | None = None, until: AwareDatetime | None = None,
                    received_until: AwareDatetime | None = None,
                    limit: Limit = 50, offset: Offset = 0):
@@ -421,6 +426,8 @@ def create_app():
         """
         if since and until and since > until:
             raise HTTPException(422, "since must not be after until")
+        location_id = access.location_filter(location_id)
+        access.require_device(db, device_id)
         query = select(AudioChunk)
         if device_id:
             query = query.where(AudioChunk.device_id == device_id)
@@ -459,8 +466,9 @@ def create_app():
         else:
             if not request.app.state.local_audio_playback:
                 raise HTTPException(401, "Bearer token required", headers={"WWW-Authenticate": "Bearer"})
-            require_admin(request, None)
+            access = require_read(request, None)
             row = require_row(db, AudioChunk, chunk_id)
+            access.require_location(row.location_id)
         path = resolve_audio_path(row.file_path, get_settings(), checksum=row.checksum)
         if not path.is_file():
             raise HTTPException(503, "Original audio unavailable; restore storage from backup")
@@ -468,9 +476,11 @@ def create_app():
                             headers={"ETag": f'"{row.checksum}"', "Cache-Control": "private, no-store"})
 
     @app.get("/measurements", tags=["measurements"])
-    def measurements(db: DB, admin: Admin, device_id: UUID | None = None, location_id: UUID | None = None,
+    def measurements(db: DB, access: Read, device_id: UUID | None = None, location_id: UUID | None = None,
                      since: AwareDatetime | None = None, until: AwareDatetime | None = None,
                      limit: Limit = 50, offset: Offset = 0):
+        location_id = access.location_filter(location_id)
+        access.require_device(db, device_id)
         query = select(Measurement).join(AudioChunk, Measurement.audio_chunk_id == AudioChunk.id)
         if device_id:
             query = query.where(AudioChunk.device_id == device_id)
@@ -486,11 +496,13 @@ def create_app():
                     serialize_many=lambda rows: measurement_dicts(db, rows))
 
     @app.get("/incidents", tags=["incidents"])
-    def incidents(db: DB, admin: Admin, device_id: UUID | None = None, location_id: UUID | None = None,
+    def incidents(db: DB, access: Read, device_id: UUID | None = None, location_id: UUID | None = None,
                   status: Literal["active", "recovering", "resolved", "closed"] | None = None,
                   since: AwareDatetime | None = None, until: AwareDatetime | None = None,
                   q: Annotated[str | None, Query(max_length=200)] = None,
                   limit: Limit = 50, offset: Offset = 0):
+        location_id = access.location_filter(location_id)
+        access.require_device(db, device_id)
         query = select(Incident)
         if q and q.strip():
             # Escaped substring matching treats wildcard characters literally.
@@ -517,18 +529,20 @@ def create_app():
         if until:
             query = query.where(Incident.started_at <= until)
         return page(db, query.order_by(Incident.started_at.desc(), Incident.id), limit, offset,
-                    serialize_many=lambda rows: incident_dicts(db, rows))
+                    serialize_many=lambda rows: access.incidents(db, incident_dicts(db, rows)))
 
     @app.get("/incidents/{incident_id}", tags=["incidents"])
-    def incident(incident_id: UUID, db: DB, admin: Admin):
+    def incident(incident_id: UUID, db: DB, access: Read):
         row = require_row(db, Incident, incident_id)
+        access.require_location(row.location_id)
         rule = db.get(ThresholdVersion, row.threshold_version_id) if row.threshold_version_id else None
-        return {**incident_dicts(db, [row])[0], "threshold_version": model_dict(rule) if rule else None}
+        return {**access.incidents(db, incident_dicts(db, [row]))[0], "threshold_version": model_dict(rule) if rule else None}
 
     @app.get("/incidents/{incident_id}/measurements", tags=["incidents"])
-    def incident_measurements(incident_id: UUID, db: DB, admin: Admin,
+    def incident_measurements(incident_id: UUID, db: DB, access: Read,
                               limit: Limit = 50, offset: Offset = 0):
         incident = require_row(db, Incident, incident_id)
+        access.require_location(incident.location_id)
         if not incident.stream_id or not incident.threshold_version_id:
             return {"items": [], "total": 0, "limit": limit, "offset": offset,
                     "association_available": False,

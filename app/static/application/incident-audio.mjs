@@ -16,7 +16,7 @@ export function createIncidentAudio(ctx, { incidentId, urls = URL } = {}) {
   const generate = button('Generate incident audio', () => load(true), 'secondary');
   const listen = button('Listen to incident audio', () => loadAudio(), 'primary'); listen.disabled = true;
   const close = button('Close incident audio', () => { releaseAudio(); (listen.disabled ? refresh : listen).focus({ preventScroll: true }); }, 'secondary'); close.hidden = true;
-  actions.append(listen, refresh, generate, close);
+  actions.append(listen, refresh); if (!ctx.readOnly) actions.append(generate); actions.append(close);
   const playbackStatus = el('p', '', 'muted small'); playbackStatus.setAttribute('role', 'status');
   const playbackVersion = el('p', '', 'muted small');
   const audio = el('audio'); audio.controls = true; audio.preload = 'none'; audio.hidden = true;
@@ -29,7 +29,7 @@ export function createIncidentAudio(ctx, { incidentId, urls = URL } = {}) {
   function controls() {
     refresh.disabled = !!request;
     generate.textContent = result?.generated_at ? 'Recalculate incident audio' : 'Generate incident audio';
-    generate.disabled = !!request || result?.status === 'processing' || (result?.status === 'pending' && !!revision()) || result?.worker_status === 'disabled';
+    generate.disabled = ctx.readOnly || !!request || result?.status === 'processing' || (result?.status === 'pending' && !!revision()) || result?.worker_status === 'disabled';
     listen.disabled = !!audioRequest || !result?.audio?.available || !revision();
     const newer = !!url && loadedRevision !== revision();
     listen.textContent = newer ? 'Load newer incident audio' : 'Listen to incident audio';
@@ -100,7 +100,7 @@ export function createIncidentAudio(ctx, { incidentId, urls = URL } = {}) {
     timer = setTimeout(() => load(false, true), delay);
   }
   async function load(recalculate = false, automatic = false) {
-    if (disposed || ctx.signal?.aborted) return;
+    if (disposed || ctx.signal?.aborted || (recalculate && ctx.readOnly)) return;
     clearTimeout(timer); request?.abort(); const own = new AbortController(); request = own; controls();
     if (!automatic) feedback.textContent = recalculate ? 'Requesting incident audio and sound analysis…' : 'Refreshing incident audio…';
     try {
